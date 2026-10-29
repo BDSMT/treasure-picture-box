@@ -1,0 +1,7 @@
+# 运行依赖（三个都是必需，别删 numpy）
+#
+# numpy 看着只用了几行（maximum / minimum / where），但没有它，
+# 2600×2600 的图要跑纯 Python 逐像素循环，预览会从 0.3 秒变成几十秒。
+Pillow>=10.0
+numpy>=1.24
+tkinterdnd2>=0.4.0

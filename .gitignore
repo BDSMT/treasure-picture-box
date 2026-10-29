@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+dist[0-9]/
+*.spec.bak
+
+# 构建时用 pip --target 装进来的依赖，靠 requirements.txt 重建
+vendor/
+
+# 运行期生成的数据
+logs/
+output/
+config.json
+
+# 演示素材（示例输入，不进仓库，本地 E:\zancun\bili\演示 保留）
+assets/
+
+# 发布产物
+release/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
