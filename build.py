@@ -22,7 +22,7 @@ import time
 import zipfile
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 APP_NAME = "藏图盒"
 BUILD_DIR = "build"
 RELEASE_DIR = "release"

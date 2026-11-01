@@ -193,6 +193,32 @@ def _selftest() -> int:
                 % (len(sp.tail), sp.tail_type, sp.tail == pay_bytes))
             with _zf.ZipFile(_io.BytesIO(sp.tail)) as zz2:
                 log("拆分后可解压: %d 项" % len(zz2.namelist()))
+
+            # ── 解包：把刚做出来的图种原样拆回来 ───────
+            from core import unpack as _un
+
+            ur = _un.unpack(seed_p)
+            with _zf.ZipFile(_io.BytesIO(pay_bytes)) as z0:
+                origin = {zi.filename: z0.read(zi) for zi in z0.infolist()}
+            got = {e.name: e.data for e in ur.entries}
+            log("解包识别: 图片=%s 载荷=%s 文件=%d 偏移还原=%s"
+                % (ur.image_kind, ur.payload_type, len(ur.entries),
+                   ur.offset_fixed))
+            log("解包内容: CRC 全通过=%s 与原始载荷一致=%s"
+                % (all(e.crc_ok for e in ur.entries), got == origin))
+
+            # 附带验证种子解析与 infohash
+            import hashlib as _hl
+
+            _tinfo = (b"d6:lengthi1024e4:name4:demo12:piece lengthi16384e6:"
+                      b"pieces20:" + b"A" * 20 + b"e")
+            _url = b"http://tracker.test/ann"
+            _tor = (b"d8:announce" + str(len(_url)).encode() + b":" + _url
+                    + b"4:info" + _tinfo + b"e")
+            _ti = _un.torrent_info(_tor)
+            log("种子解析: 名称=%s 文件数=%d 大小=%d infohash 正确=%s"
+                % (_ti.name, _ti.files, _ti.size,
+                   _ti.infohash == _hl.sha1(_tinfo).hexdigest()))
         finally:
             try:
                 import shutil
@@ -217,13 +243,13 @@ def _selftest() -> int:
             log("主窗口: %dx%d（含标题栏）"
                 % (app.winfo_width(), app.winfo_height()))
             tabs = []
-            for key in ("seed", "phantom", "reveal"):
+            for key in ("seed", "unpack", "phantom", "reveal"):
                 app.tab = key
                 app.build()
                 app.update()
                 tabs.append(key)
             app.destroy()
-            log("主界面: ✅ 三个模块均可创建（%s）" % ", ".join(tabs))
+            log("主界面: ✅ 四个模块均可创建（%s）" % ", ".join(tabs))
         except Exception:  # noqa: BLE001
             log("主界面: ❌\n" + traceback.format_exc())
 

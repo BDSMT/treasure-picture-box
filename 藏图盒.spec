@@ -52,7 +52,7 @@ a = Analysis(
     hiddenimports=[
         "tkinterdnd2", "tkinterdnd2.TkinterDnD",
         "core.paths", "core.sniff", "core.seed", "core.phantom",
-        "core.reveal", "core.imageio",
+        "core.reveal", "core.imageio", "core.unpack", "core.zipfix",
         "ui.app", "ui.theme", "ui.widgets",
         "PIL._tkinter_finder",
     ],
