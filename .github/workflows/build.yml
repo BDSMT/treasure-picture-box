@@ -1,6 +1,6 @@
 name: build
 
-# 打 tag（比如 v1.0.0）自动构建并发布；
+# 打 tag（比如 v1.1.0）自动构建并发布；
 # 也可以在 Actions 页面手动点 Run workflow 只构建不发版。
 on:
   push:
@@ -13,10 +13,19 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    # runner 是英文 Windows，控制台代码页 cp1252，编不出中文：
+    # 不强制 UTF-8 的话 build.py 第一行 print 就会 UnicodeEncodeError 崩掉。
+    # CANGTU_SKIP_GUI：runner 没有交互桌面，自检里建窗口的项直接跳过。
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      CANGTU_SKIP_GUI: "1"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
           cache: pip
@@ -27,7 +36,7 @@ jobs:
           python build.py
 
       - name: 上传产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: win64
           path: release/*.zip
@@ -35,7 +44,7 @@ jobs:
 
       - name: 发布到 Releases
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release/*.zip
           generate_release_notes: true
@@ -44,6 +53,9 @@ jobs:
 
             下载后解压到任意可写目录，双击 `藏图盒.exe` 即可。
             不需要装 Python，不需要联网。
+
+            本版新增 **图种解包**：拖入一张图种就能直接看到里面的文件，
+            不用再改后缀去解压。
 
             > 首次运行会被 SmartScreen 拦截（没有代码签名），
             > 点「更多信息」→「仍要运行」。

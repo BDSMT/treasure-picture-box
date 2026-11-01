@@ -52,6 +52,11 @@ def _selftest() -> int:
     """
     import tempfile
 
+    # CI / 远程构建的机器上没有可用的交互桌面，建窗口必然抛异常。
+    # 这类环境只验算法，图形相关的项明确标成「跳过」而不是「失败」。
+    no_gui = ("--no-gui" in sys.argv
+              or os.environ.get("CANGTU_SKIP_GUI") == "1")
+
     lines = []
 
     def log(m):
@@ -94,17 +99,20 @@ def _selftest() -> int:
         except Exception as exc:  # noqa: BLE001
             log("tkinterdnd2: ❌ %s" % exc)
 
-        try:
-            from tkinterdnd2 import DND_FILES, TkinterDnD
+        if no_gui:
+            log("拖放: ⏭ 跳过（无图形环境）")
+        else:
+            try:
+                from tkinterdnd2 import DND_FILES, TkinterDnD
 
-            r = TkinterDnD.Tk()
-            r.withdraw()
-            r.drop_target_register(DND_FILES)
-            r.update()
-            r.destroy()
-            log("拖放: ✅ 可用")
-        except Exception as exc:  # noqa: BLE001
-            log("拖放: ❌ %s" % exc)
+                r = TkinterDnD.Tk()
+                r.withdraw()
+                r.drop_target_register(DND_FILES)
+                r.update()
+                r.destroy()
+                log("拖放: ✅ 可用")
+            except Exception as exc:  # noqa: BLE001
+                log("拖放: ❌ %s" % exc)
 
         tmp = Path(tempfile.mkdtemp(prefix="seedbox_"))
         try:
@@ -228,30 +236,33 @@ def _selftest() -> int:
                 pass
 
         # ── 主界面能否创建 ────────────────────────────
-        try:
-            from ui.app import App, _system_dpi
+        if no_gui:
+            log("主界面: ⏭ 跳过（无图形环境）")
+        else:
+            try:
+                from ui.app import App, _system_dpi
 
-            app = App()               # 构造时才开启 DPI 感知，所以要在这之后读尺寸
-            app.withdraw()
-            app.update()
-
-            dpi = _system_dpi()
-            log("屏幕: dpi=%d 缩放=%.2f 分辨率=%dx%d"
-                % (dpi, dpi / 96.0,
-                   ctypes.windll.user32.GetSystemMetrics(0),
-                   ctypes.windll.user32.GetSystemMetrics(1)))
-            log("主窗口: %dx%d（含标题栏）"
-                % (app.winfo_width(), app.winfo_height()))
-            tabs = []
-            for key in ("seed", "unpack", "phantom", "reveal"):
-                app.tab = key
-                app.build()
+                app = App()               # 构造时才开启 DPI 感知，所以要在这之后读尺寸
+                app.withdraw()
                 app.update()
-                tabs.append(key)
-            app.destroy()
-            log("主界面: ✅ 四个模块均可创建（%s）" % ", ".join(tabs))
-        except Exception:  # noqa: BLE001
-            log("主界面: ❌\n" + traceback.format_exc())
+
+                dpi = _system_dpi()
+                log("屏幕: dpi=%d 缩放=%.2f 分辨率=%dx%d"
+                    % (dpi, dpi / 96.0,
+                       ctypes.windll.user32.GetSystemMetrics(0),
+                       ctypes.windll.user32.GetSystemMetrics(1)))
+                log("主窗口: %dx%d（含标题栏）"
+                    % (app.winfo_width(), app.winfo_height()))
+                tabs = []
+                for key in ("seed", "unpack", "phantom", "reveal"):
+                    app.tab = key
+                    app.build()
+                    app.update()
+                    tabs.append(key)
+                app.destroy()
+                log("主界面: ✅ 四个模块均可创建（%s）" % ", ".join(tabs))
+            except Exception:  # noqa: BLE001
+                log("主界面: ❌\n" + traceback.format_exc())
 
         log("=== 自检结束 ===")
     except Exception:  # noqa: BLE001

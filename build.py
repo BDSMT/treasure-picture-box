@@ -22,6 +22,15 @@ import time
 import zipfile
 from pathlib import Path
 
+# Windows 控制台按「本地代码页」输出：中文系统是 cp936，英文系统是 cp1252。
+# 后者编不出中文，连 print 一行「藏图盒 v1.1.0 构建」都会 UnicodeEncodeError 崩掉。
+# GitHub Actions 的 windows runner 正是英文环境 —— 构建脚本第一行就挂在这里。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001  被重定向或老版本 Python，忽略即可
+        pass
+
 VERSION = "1.1.0"
 APP_NAME = "藏图盒"
 BUILD_DIR = "build"
@@ -61,15 +70,19 @@ READ_ME = """\
   整个文件夹可以拷到 U 盘里带走，配置跟着走。
 
 
-【三个功能】
-
-  幻影坦克  一张 PNG 里塞两个画面，白底看一张、黑底看另一张。
-           拖进两张图，右边会同时显示两种底色的效果。
-
-  幻影提取  把幻影坦克图拆回两张画面。
+【四个功能】
 
   图种      把压缩包藏进图片。注意载荷必须是 .zip，
-           生成后把后缀改成 .zip 才能解压。
+            生成后把后缀改成 .zip 才能解压。
+
+  图种解包  拖入一张图种，直接把里面的文件列出来，不用改后缀。
+            顺带做 CRC 校验，文件坏了会标出来。
+            是种子的可以直接导出 .torrent。
+
+  幻影坦克  一张 PNG 里塞两个画面，白底看一张、黑底看另一张。
+            拖进两张图，右边会同时显示两种底色的效果。
+
+  幻影提取  把幻影坦克图拆回两张画面。
 
 
 【出问题了】
@@ -201,7 +214,13 @@ def verify(exe: Path) -> None:
         log.unlink()
 
     try:
-        r = subprocess.run([str(exe), "--selftest"], cwd=str(exe.parent),
+        cmd = [str(exe), "--selftest"]
+        # CI 的 runner 没有可用的交互桌面，建窗口那几项必然失败。
+        # 那种环境下只验算法，图形相关的检查交给本机构建把关。
+        if os.environ.get("CANGTU_SKIP_GUI") or os.environ.get("CI"):
+            cmd.append("--no-gui")
+            say("检测到 CI 环境，跳过图形相关自检项")
+        r = subprocess.run(cmd, cwd=str(exe.parent),
                            timeout=120, stdin=subprocess.DEVNULL,
                            capture_output=True)
     except subprocess.TimeoutExpired:
