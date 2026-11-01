@@ -13,7 +13,7 @@ Windows 10 / 11 (x64) · Python 3.10+ · MIT License
 
 **[⬇ 下载最新版](../../releases/latest)**
 
-1. 下载 `藏图盒-vX.X.X-win64.zip`
+1. 下载 `cangtu-box-vX.X.X-win64.zip`
 2. 解压到**任意可写目录**（别放 `C:\Program Files`，那里写不了配置和日志）
 3. 双击 `藏图盒.exe`
 
@@ -151,7 +151,9 @@ pip install -r requirements-dev.txt
 python build.py
 ```
 
-产物在 `release/藏图盒-vX.X.X-win64.zip`，解压即用。
+产物在 `release/cangtu-box-vX.X.X-win64.zip`，解压即用。
+（压缩包用 ASCII 名，因为 GitHub 的发布动作会吃掉中文文件名；
+解压出来的目录仍是 `藏图盒-vX.X.X-win64`。）
 
 `build.py` 会依次做：装依赖到 `vendor/` → PyInstaller 打包（onedir）→
 拷入说明和许可证 → 打 zip。用 onedir 而不是 onefile，是因为 onefile

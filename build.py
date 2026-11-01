@@ -287,7 +287,10 @@ def make_zip(pkg: Path) -> Path:
     step("压缩发布包")
     out_dir = ROOT / RELEASE_DIR
     out_dir.mkdir(exist_ok=True)
-    out = out_dir / ("%s-v%s-win64.zip" % (APP_NAME, VERSION))
+    # 压缩包用 ASCII 名：GitHub 的发布动作会把非 ASCII 字符吃掉，
+    # 「藏图盒-v1.1.0-win64.zip」传上去会变成「-v1.1.0-win64.zip」。
+    # 解压出来的目录名仍是中文，用户看到的还是「藏图盒」。
+    out = out_dir / ("cangtu-box-v%s-win64.zip" % VERSION)
     if out.exists():
         out.unlink()
 
