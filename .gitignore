@@ -23,6 +23,9 @@ config.json
 # 演示素材（示例输入，不进仓库，本地 E:\zancun\bili\演示 保留）
 assets/
 
+# AI 分割模型（176 MB，外置下载，不进仓库）
+models/
+
 # 发布产物
 release/
 

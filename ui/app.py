@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """藏图盒 —— 界面。
 
-四个模块：图种（字节追加）、图种解包（把追加的东西拆出来）、
-幻影坦克（双画面合成）、幻影提取（还原）。
+五个模块：图种（字节追加）、图种解包（把追加的东西拆出来）、
+幻影坦克（双画面合成）、幻影提取（还原）、抠图（主体分离 + 三视图）。
 预览全程在本地完成，不经过任何浏览器或网络。
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox
 from PIL import Image
 
 from core import paths as P
-from core import phantom, reveal, seed, unpack
+from core import matting, phantom, reveal, seed, unpack
 from core.seed import payload_kind
 from core.imageio import LANCZOS, fit_contain, open_rgba, over_background, save_png
 from core.sniff import is_image_name, sniff
@@ -38,6 +38,7 @@ IMAGE_TYPES = [
 ]
 
 PREVIEW_SIDE = 760   # 预览合成的最长边
+CUT_PREVIEW_SIDE = 1400   # 抠图预览的输入边长，导出时会按原尺寸重算
 
 
 def _setup_dpi():
@@ -130,6 +131,7 @@ class App(_Base):
         self.st_pt = {"fg": None, "bg": None, "result": None}
         self.st_ex = {"path": None, "factor": float(self.cfg.get("reveal_factor", 2.0)),
                       "auto": bool(self.cfg.get("reveal_auto", True))}
+        self.st_cu = {"path": None, "backdrop": "auto"}
 
         self._refs = []
         self.build()
@@ -180,6 +182,7 @@ class App(_Base):
             ("unpack", "图种解包", "直接拆出种子"),
             ("phantom", "幻影坦克", "一张图两个画面"),
             ("reveal", "幻影提取", "把藏着的画面还原"),
+            ("cut", "抠图", "主体分离 · 三视图"),
         ):
             self._rail_btn(rail, key, label, sub)
 
@@ -194,8 +197,10 @@ class App(_Base):
             self.build_unpack()
         elif self.tab == "phantom":
             self.build_phantom()
-        else:
+        elif self.tab == "reveal":
             self.build_reveal()
+        else:
+            self.build_cut()
 
     def _rail_btn(self, parent, key, label, sub):
         pal = self.pal
@@ -1222,6 +1227,208 @@ class App(_Base):
             self.toast("保存失败：%s" % exc, True)
 
 
+    # ══════════════════════════════════════════════════════
+    #  模块五：抠图
+    # ══════════════════════════════════════════════════════
+    def build_cut(self):
+        pal = self.pal
+        wrap = ScrollFrame(self.stage, pal)
+        wrap.pack(fill="both", expand=True)
+        root = wrap.inner
+
+        tk.Label(root, text="抠图", bg=pal["bg"], fg=pal["ink"],
+                 font=FONTS["title"], anchor="w").pack(anchor="w")
+        tk.Label(
+            root,
+            text="识别画面里的主体并抠出来，左中右三张：原图、抠出的元素、衬底效果。"
+                 "衬白底还是黑底由主体亮度决定 —— 深色主体配白底，浅色配黑底，对比最大。",
+            bg=pal["bg"], fg=pal["ink3"], font=FONTS["ui_xs"],
+            anchor="w", justify="left", wraplength=s(820),
+        ).pack(anchor="w", pady=(4, 14))
+
+        p = self.st_cu["path"]
+        filled = thumb = None
+        if p:
+            try:
+                filled = {"name": Path(p).name,
+                          "line": "%s · %s" % (_dims(p), fmt_size(os.path.getsize(p)))}
+                thumb = _thumb(p, (72, 72))
+            except OSError:
+                filled = {"name": Path(p).name, "line": _dims(p)}
+        DropCard(
+            root, pal, "原图", "拖入图片，或点击选择",
+            "带主体就行，背景复杂也能试",
+            on_pick=lambda: self._pick(self.cu_set, True, "选择要抠图的原图"),
+            on_path=self.cu_set, accept=is_image_name,
+            thumb=thumb, filled=filled,
+        ).pack(fill="x")
+
+        # ── 当前引擎 ─────────────────────────────────────
+        eng = tk.Frame(root, bg=pal["bg"])
+        eng.pack(fill="x", pady=(10, 0))
+        ai_ready = matting.mode() == "ai"
+        tk.Label(eng, text="引擎：", bg=pal["bg"], fg=pal["ink3"],
+                 font=FONTS["ui_xs"]).pack(side="left")
+        tk.Label(eng,
+                 text="AI 分割模型（复杂背景可用）" if ai_ready
+                 else "基础算法（纯色/渐变底可用）",
+                 bg=pal["bg"], fg=pal["ok_ink"] if ai_ready else pal["warn_ink"],
+                 font=FONTS["ui_xs"]).pack(side="left")
+        if not ai_ready:
+            tk.Label(eng, text="· 把 isnet-anime.onnx 放进 models/ 可启用 AI",
+                     bg=pal["bg"], fg=pal["ink3"],
+                     font=FONTS["ui_xs"]).pack(side="left")
+
+        # ── 三视图 ───────────────────────────────────────
+        pv = tk.Frame(root, bg=pal["bg"])
+        pv.pack(fill="x", pady=(12, 0))
+        for i in range(3):
+            pv.columnconfigure(i, weight=1, uniform="cu")
+
+        # 素材多为竖幅，格子做成竖长方形比正方形省横向空间
+        cell = (s(238), s(300))
+        self.cu_a = PreviewTile(pv, pal, "原图", "", bg_rgb=(30, 30, 34), size=cell)
+        self.cu_a.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.cu_b = PreviewTile(pv, pal, "抠出的元素", "棋盘格＝透明", bg_rgb=(158, 158, 158),
+                                size=cell)
+        self.cu_b.grid(row=0, column=1, sticky="nsew", padx=8)
+        self.cu_c = PreviewTile(pv, pal, "衬底效果", "", bg_rgb=(255, 255, 255), size=cell)
+        self.cu_c.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+
+        # ── 结论 ─────────────────────────────────────────
+        self.cu_note = tk.Label(
+            root, text="拖入一张图就会自动分析。" if not p else "正在识别主体…",
+            bg=pal["bg"], fg=pal["ink3"], font=FONTS["ui_xs"], anchor="w",
+            justify="left", wraplength=s(820), height=3,
+        )
+        self.cu_note.pack(anchor="w", pady=(12, 4))
+
+        # ── 底色与导出 ───────────────────────────────────
+        bar = tk.Frame(root, bg=pal["bg"])
+        bar.pack(fill="x", pady=(4, 0))
+
+        tk.Label(bar, text="衬底", bg=pal["bg"], fg=pal["ink3"],
+                 font=FONTS["ui_xs"]).pack(side="left", padx=(0, 8))
+        self.cu_btns = {}
+        for key, label in (("auto", "自动"), ("white", "白底"), ("black", "黑底")):
+            b = tk.Label(bar, text=label, font=FONTS["ui_xs"], padx=s(12), pady=s(5),
+                         cursor="hand2", highlightthickness=0)
+            b.bind("<Button-1>", lambda e, k=key: self._cu_backdrop(k))
+            b.pack(side="left", padx=(0, 6))
+            self.cu_btns[key] = b
+
+        self._btn(bar, "保存透明 PNG", lambda: self.cu_save("png"),
+                  primary=True).pack(side="right")
+        self._btn(bar, "保存三视图", lambda: self.cu_save("view")).pack(side="right", padx=8)
+
+        self._cu_mark()
+        if p:
+            self.after(60, self._cu_recompute)
+
+    # ── 抠图：状态与刷新 ─────────────────────────────────
+    def cu_set(self, path):
+        self.st_cu["path"] = path
+        self.build()
+        self.after(60, self._cu_recompute)
+
+    def _cu_mark(self):
+        """三个衬底按钮的选中态。"""
+        pal = self.pal
+        for key, b in getattr(self, "cu_btns", {}).items():
+            on = key == self.st_cu["backdrop"]
+            b.configure(bg=pal["solid"] if on else pal["surface"],
+                        fg=pal["on_solid"] if on else pal["ink2"])
+
+    def _cu_backdrop(self, key):
+        self.st_cu["backdrop"] = key
+        self._cu_paint()
+        self._cu_mark()
+
+    def _cu_recompute(self):
+        if self.tab != "cut" or not hasattr(self, "cu_a"):
+            return
+        path = self.st_cu["path"]
+        if not path:
+            return
+        self.cu_note.config(text="正在识别主体…", fg=self.pal["ink3"])
+        self.update_idletasks()
+        try:
+            res = matting.cut(path, max_side=CUT_PREVIEW_SIDE)
+        except Exception as exc:                      # noqa: BLE001
+            self.cu_note.config(text="处理失败：%s" % exc, fg=self.pal["bad_ink"])
+            return
+        if res is None:
+            self.cu_note.config(text="这张图读不出来（格式不支持或文件损坏）。",
+                                fg=self.pal["bad_ink"])
+            return
+
+        self._cu_res = res
+        self._cu_paint()
+        self.cu_note.config(text=self._cu_text(res),
+                            fg=self.pal["warn_ink"] if res.issues else self.pal["ink3"])
+
+    def _cu_text(self, res) -> str:
+        bits = ["模式 %s" % ("AI 分割" if res.mode == "ai" else "基础算法"),
+                "主体占画面 %.0f%%" % (res.cover * 100),
+                "耗时 %.1f 秒" % (res.ms / 1000.0)]
+        head = " · ".join(bits)
+        if res.issues:
+            return head + "\n结果是可疑的：" + "；".join(res.issues) + "。可以换张图，或把模型放进 models/ 再试。"
+        tail = "边缘按原图细节重新算过，发梢这类细结构能留住。"
+        if res.mode == "basic":
+            tail = "基础算法只认「背景颜色连不连续」，背景一复杂就会出错 —— 那种情况需要 AI 模型。"
+        return head + "\n" + tail
+
+    def _cu_paint(self):
+        res = getattr(self, "_cu_res", None)
+        if res is None or not hasattr(self, "cu_a"):
+            return
+        bd = self.st_cu["backdrop"]
+        left, mid, right = matting.layers(res, bd)
+        self.cu_a.set_image(matting.as_pil(left))
+        self.cu_b.set_image(matting.as_pil(mid))
+        self.cu_c.set_image(matting.as_pil(right))
+
+        real = res.backdrop if bd == "auto" else bd
+        self.cu_c.canvas.configure(bg="#FFFFFF" if real == "white" else "#0A0A0C")
+        self.cu_c.set_caption(
+            ("自动 → " + ("白底" if res.backdrop == "white" else "黑底")) if bd == "auto"
+            else ("白底" if bd == "white" else "黑底"))
+        self._cu_mark()
+
+    # ── 抠图：导出（按原尺寸重算）────────────────────────
+    def cu_save(self, what):
+        path = self.st_cu["path"]
+        if not path:
+            self.toast("还没有可以保存的图。", True)
+            return
+        if what == "png":
+            out = self._ask_save("%s_抠出.png" % _stem(path), ".png")
+        else:
+            out = self._ask_save("%s_三视图.png" % _stem(path), ".png")
+        if not out:
+            return
+
+        self.toast("按原尺寸重算中…")
+        self.update_idletasks()
+        try:
+            full = matting.cut(path)              # 不缩，保持原分辨率
+            if full is None:
+                self.toast("读不出这张图。", True)
+                return
+            if what == "png":
+                matting.save_png(full, out)
+            else:
+                matting.save_compose(full, out, self.st_cu["backdrop"], max_side=0)
+        except Exception as exc:                  # noqa: BLE001
+            self.toast("保存失败：%s" % exc, True)
+            return
+        self.toast("已保存 %s（%dx%d）"
+                   % (fmt_size(os.path.getsize(out)), full.size[0], full.size[1]))
+
+
 def run():
     app = App()
     app.mainloop()
+
+

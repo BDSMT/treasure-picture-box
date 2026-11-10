@@ -227,6 +227,79 @@ def _selftest() -> int:
             log("种子解析: 名称=%s 文件数=%d 大小=%d infohash 正确=%s"
                 % (_ti.name, _ti.files, _ti.size,
                    _ti.infohash == _hl.sha1(_tinfo).hexdigest()))
+
+            # ── 抠图：造一张「纯色底 + 主体 + 细发丝」的图验收 ──
+            from core import matting as _mat
+
+            try:
+                import cv2 as _cv
+                import numpy as _np
+
+                # AI 模型是外置的（发布包不带，用户自己放 models/），
+                # 这里只报告「有没有、能不能加载」，不作为硬性失败项。
+                _mp = _mat.find_model()
+                if _mp:
+                    try:
+                        _sess = _mat._session_get(_mp)
+                        log("抠图模型: %s 加载=%s（AI 模式可用）"
+                            % (_mp.name, _sess is not None))
+                    except Exception as _me:  # noqa: BLE001
+                        log("抠图模型: %s 加载失败=%s" % (_mp.name, _me))
+                else:
+                    log("抠图模型: 未找到（纯算法模式，复杂背景能力受限）")
+
+                # 白底、深灰主体、五条两像素宽的细线（模拟发梢）
+                _W = _H = 400
+                _canvas = _np.full((_H, _W, 3), 255, _np.uint8)
+                _cv.circle(_canvas, (200, 230), 85, (70, 70, 78), -1)
+                for _i in range(5):
+                    _x = 150 + _i * 25
+                    _cv.line(_canvas, (_x, 150), (_x, 60), (70, 70, 78), 2)
+                _cp = tmp / "cut_probe.png"
+                _ok, _buf = _cv.imencode(".png", _canvas)
+                _buf.tofile(str(_cp))
+
+                _r = _mat.cut(str(_cp))
+                if _r is None:
+                    log("抠图: ❌ 读不出测试图")
+                else:
+                    _a = _r.alpha
+                    _corner = float(_a[0:12, 0:12].mean())
+                    _core = float(_a[215:245, 185:215].mean())
+                    _strand = float(max(_a[70:110, 148:154].mean(),
+                                        _a[70:110, 248:254].mean()))
+                    _okcorner = _corner < 0.15
+                    _okcore = _core > 0.85
+                    _okstrand = _strand > 0.30
+                    log("抠图[%s]: 背景残留=%.2f 主体不透明=%.2f 细线保留=%.2f → %s"
+                        % (_r.mode, _corner, _core, _strand,
+                           "✅" if (_okcorner and _okcore and _okstrand) else "❌"))
+                    log("抠图底色: 深色主体→%s（应为 white）判定=%s 占比=%.0f%%"
+                        % (_r.backdrop, "✅" if _r.backdrop == "white" else "❌",
+                           _r.cover * 100))
+
+                    # 浅色主体应该反过来衬黑底
+                    _light = _np.full((240, 240, 3), 255, _np.uint8)
+                    _cv.circle(_light, (120, 120), 60, (232, 232, 238), -1)
+                    _cv.circle(_light, (120, 120), 60, (150, 150, 158), 2)
+                    _lp = tmp / "cut_light.png"
+                    _ok, _buf = _cv.imencode(".png", _light)
+                    _buf.tofile(str(_lp))
+                    _rl = _mat.cut(str(_lp))
+                    if _rl is not None:
+                        log("抠图底色: 浅色主体→%s（应为 black）判定=%s"
+                            % (_rl.backdrop, "✅" if _rl.backdrop == "black" else "❌"))
+
+                    # 三视图形状：横排三张，宽=3×W
+                    _views = _mat.compose(_r)
+                    log("抠图三视图: %dx%d 宽度倍数=%.1f %s"
+                        % (_views.shape[0], _views.shape[1],
+                           _views.shape[1] / max(1, _r.size[0]),
+                           "✅" if _views.shape[1] >= _r.size[0] * 3 else "❌"))
+            except ImportError:
+                log("抠图: ⏭ 跳过（未安装 opencv）")
+            except Exception:  # noqa: BLE001
+                log("抠图: ❌\n" + traceback.format_exc())
         finally:
             try:
                 import shutil
@@ -254,13 +327,13 @@ def _selftest() -> int:
                 log("主窗口: %dx%d（含标题栏）"
                     % (app.winfo_width(), app.winfo_height()))
                 tabs = []
-                for key in ("seed", "unpack", "phantom", "reveal"):
+                for key in ("seed", "unpack", "phantom", "reveal", "cut"):
                     app.tab = key
                     app.build()
                     app.update()
                     tabs.append(key)
                 app.destroy()
-                log("主界面: ✅ 四个模块均可创建（%s）" % ", ".join(tabs))
+                log("主界面: ✅ 五个模块均可创建（%s）" % ", ".join(tabs))
             except Exception:  # noqa: BLE001
                 log("主界面: ❌\n" + traceback.format_exc())
 

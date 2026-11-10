@@ -53,6 +53,7 @@ a = Analysis(
         "tkinterdnd2", "tkinterdnd2.TkinterDnD",
         "core.paths", "core.sniff", "core.seed", "core.phantom",
         "core.reveal", "core.imageio", "core.unpack", "core.zipfix",
+        "core.matting",
         "ui.app", "ui.theme", "ui.widgets",
         "PIL._tkinter_finder",
     ],
@@ -63,11 +64,30 @@ a = Analysis(
         "matplotlib", "scipy", "pandas", "notebook", "IPython",
         "PyQt5", "PyQt6", "PySide2", "PySide6", "wx",
         "pytest", "setuptools", "pip", "unittest",
+        # onnxruntime / opencv 的可选后端会把整个 PyTorch 拖进来（371 MB），
+        # 抠图只用 onnxruntime 的 CPU provider，不碰 torch。
+        "torch", "torchvision", "torchaudio", "torchtext",
+        "tensorflow", "jax", "transformers", "accelerate",
+        "sklearn", "skimage", "sympy", "networkx",
     ],
     noarchive=False,
 )
 
 pyz = PYZ(a.pure)
+
+# cv2 的包体里有一大半是抠图用不到的东西：
+#   opencv_videoio_ffmpeg  27 MB —— 视频解码，本工具只处理静态图
+#   cv2/data/haarcascade*    ~8 MB —— 人脸/人脸识别级联数据
+# 剔掉它们能省约 35 MB，不影响任何功能。
+_DROP = ("opencv_videoio_ffmpeg", "cv2/data/haarcascade", "cv2/data/lbpcascade")
+
+# torch 是被 onnxruntime 的 hook 用 collect_all 当作二进制/数据收集进来的，
+# 光靠上面的 excludes 拦不住（excludes 只作用于模块图，不作用于收集到的二进制）。
+# 抠图只用 CPU 推理，torch 及其 DLL 完全用不到，这里在收集层直接剥掉，省约 370 MB。
+_DROP += ("torch",)
+a.binaries = [b for b in a.binaries if not any(k in b[0] for k in _DROP)]
+a.datas = [d for d in a.datas if not any(k in d[0] for k in _DROP)]
+print("[spec] 已剔除 cv2 视频解码 / 人脸级联 / torch")
 
 exe = EXE(
     pyz,

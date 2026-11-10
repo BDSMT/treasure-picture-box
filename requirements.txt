@@ -1,7 +1,13 @@
-# 运行依赖（三个都是必需，别删 numpy）
+# 运行依赖
 #
 # numpy 看着只用了几行（maximum / minimum / where），但没有它，
 # 2600×2600 的图要跑纯 Python 逐像素循环，预览会从 0.3 秒变成几十秒。
 Pillow>=10.0
 numpy>=1.24
 tkinterdnd2>=0.4.0
+
+# 抠图模块（模块五）
+#   opencv —— 区域生长、连通域、形态学、引导滤波，这些 numpy 手写不划算
+#   onnxruntime —— 跑 isnet-anime 分割模型；没装或没模型时抠图自动退回纯算法
+opencv-python>=4.8
+onnxruntime>=1.16
