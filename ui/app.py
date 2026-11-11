@@ -1,24 +1,33 @@
 # -*- coding: utf-8 -*-
-"""藏图盒 —— 界面。
+"""藏图盒 —— 界面（框架层）。
 
-五个模块：图种（字节追加）、图种解包（把追加的东西拆出来）、
-幻影坦克（双画面合成）、幻影提取（还原）、抠图（主体分离 + 三视图）。
-预览全程在本地完成，不经过任何浏览器或网络。
+这个文件现在只剩「壳」：标题栏、侧栏、主题切换、通用小件、
+以及把插件挂到舞台上的分发逻辑。五个功能模块都是插件 ——
+清单在 plugins/*/plugin.json，代码在各自的 plugin.py（或暂时还在本体的 build_xxx）。
+
+加一个模块不再需要改这个文件：往 plugins/ 放一个目录，
+写个 plugin.json 和 plugin.py，重启就出现在侧栏里。
 """
 from __future__ import annotations
 
 import os
+import sys
+import time
+import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 from PIL import Image
 
-from core import paths as P
-from core import matting, phantom, reveal, seed, unpack
-from core.seed import payload_kind
+from core import matting, phantom, paths as P, reveal, seed
 from core.imageio import LANCZOS, fit_contain, open_rgba, over_background, save_png
+from core.seed import payload_kind
 from core.sniff import is_image_name, sniff
+from ui import widgets as W
+from cangtu.api import (HostContext, dims as _dims, ext_of as _ext,
+                        short_name as _short, stem_of as _stem, thumb as _thumb)
+from cangtu.loader import PluginError, PluginManager
 from cangtu.spinner import Spinner, readable_on
 from cangtu.tasks import TaskRunner
 from ui.theme import FONTS, palette, s, scale, setup_scale
@@ -41,6 +50,34 @@ IMAGE_TYPES = [
 
 PREVIEW_SIDE = 760   # 预览合成的最长边
 CUT_PREVIEW_SIDE = 1400   # 抠图预览的输入边长，导出时会按原尺寸重算
+
+# 插件目录整个丢了时的兜底：这几项的实现还在本体里，少了清单也能起来。
+# 注意不含 unpack —— 它已经真搬进 plugins/ 了，没有目录就是没有它。
+_FALLBACK_TABS = [
+    ("seed", "图种", "图片 + 隐藏文件", "build_seed"),
+    ("phantom", "幻影坦克", "一张图两个画面", "build_phantom"),
+    ("reveal", "幻影提取", "把藏着的画面还原", "build_reveal"),
+    ("cut", "抠图", "主体分离 · 三视图", "build_cut"),
+]
+
+
+def plugin_roots() -> tuple:
+    """(用户插件目录, [随包插件目录])。
+
+    用户目录优先：想换掉某个出厂插件，往这里放一份同 id 的即可。
+    """
+    user = P.ROOT / "plugins"
+    bundled = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        p = Path(base) / "plugins"
+        try:
+            if p.resolve() != user.resolve():
+                bundled.append(p)
+        except OSError:
+            bundled.append(p)
+    return user, bundled
+
 
 
 def _setup_dpi():
@@ -67,37 +104,8 @@ def _system_dpi() -> int:
         return 96
 
 
-def _stem(p: str) -> str:
-    return Path(p).stem
-
-
-def _ext(p: str) -> str:
-    return Path(p).suffix
-
-
-def _short(name: str, limit: int = 54) -> str:
-    """名字太长就掐中间，保住结尾的扩展名 —— 一行放不下会被 Tk 直接切掉。"""
-    if len(name) <= limit:
-        return name
-    keep_head = limit - 16
-    return name[:keep_head] + "…" + name[-(limit - keep_head - 1):]
-
-
-def _thumb(path: str, box=(64, 64)):
-    try:
-        im = open_rgba(path)
-        im.thumbnail(box, LANCZOS)
-        return im
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _dims(path: str) -> str:
-    try:
-        with Image.open(path) as im:
-            return "%d × %d" % im.size
-    except Exception:  # noqa: BLE001
-        return "—"
+# 小工具（_stem / _ext / _short / _thumb / _dims）已经上移到 cangtu.api，
+# 插件和本体共用同一份实现，避免两边行为慢慢跑偏。这里直接用导入的别名。
 
 
 class App(_Base):
@@ -129,7 +137,6 @@ class App(_Base):
         self.tab = "seed"
         self.st_seed = {"cover": None, "pay": None, "result": None, "extra": 0,
                         "kind": "", "end": 0, "pay_kind": ""}
-        self.st_un = {"path": None, "result": None, "error": ""}
         self.st_pt = {"fg": None, "bg": None, "result": None}
         self.st_ex = {"path": None, "factor": float(self.cfg.get("reveal_factor", 2.0)),
                       "auto": bool(self.cfg.get("reveal_auto", True))}
@@ -138,12 +145,49 @@ class App(_Base):
         # 异步执行器：所有耗时处理都走它，期间的转圈也由它管
         self.tasks = TaskRunner(self)
 
+        # 控件库与字体：插件通过 ctx.widgets / ctx.fonts 拿到，保证长得一样
+        self.W = W
+        self.F = FONTS
+
+        # ── 插件 ────────────────────────────────────────────
+        # 发现阶段只读 plugin.json，真正的 import 推迟到第一次切到该 tab。
+        # 这就是「启动时不为抠图那 100 MB 付费」的全部秘密。
+        user_root, bundled = plugin_roots()
+        self.plugins = PluginManager(user_root, bundled, holder=self)
+        self.plugins.discover()
+        self.ctx = HostContext(self)
+        self._fallback = not bool(self.plugins.metas())
+
         self._refs = []
         self.build()
 
     # ══════════════════════════════════════════════════════
     #  骨架
     # ══════════════════════════════════════════════════════
+    def plugin_list(self) -> list:
+        """侧栏要显示的模块 —— **只列真能用的那些**。
+
+        判定条件（三条全过才出现）：
+            1. 清单存在（plugin.json 在，即「装了」）
+            2. 没有被 manifest 停用
+            3. 自身就绪（API 版本匹配 + probe 里的模块用 find_spec 找得到）
+
+        任何一条不满足就**整条消失**，不占位、不置灰、不写「已停用」。
+        对用户来说判据只有一条：看得见 = 能用，看不见 = 这台机器上没有。
+        """
+        vis = [m for m in self.plugins.metas()
+               if self.plugins.enabled(m.id) and m.ready]
+        if vis:
+            return vis
+        if self.plugins.metas():
+            return []          # 全被停用了：一个都不显示，交给空态页
+        # 插件目录整个丢了（用户误删 / 只拷了 exe）：退回本体内置的兜底清单
+        from cangtu.api import PluginMeta
+
+        return [PluginMeta(id=k, name=n, subtitle=sub, builtin=m,
+                           order=(i + 1) * 10, origin="builtin")
+                for i, (k, n, sub, m) in enumerate(_FALLBACK_TABS)]
+
     def build(self):
         pal = palette(self.theme)
         self.pal = pal
@@ -153,6 +197,13 @@ class App(_Base):
         self.tasks.detach_spinners()
         for w in self.winfo_children():
             w.destroy()
+
+        # 先算出「这轮到底有哪些模块能显示」，再做其它事。
+        # 停用 / 卸载之后 tab 可能已经不存在了，落到第一个能用的上面。
+        metas = self.plugin_list()
+        if self.tab not in [m.id for m in metas]:
+            self.tab = metas[0].id if metas else ""
+        self._visible = metas
 
         self.configure(bg=pal["bg"])
 
@@ -182,38 +233,110 @@ class App(_Base):
         body = tk.Frame(self, bg=pal["bg"])
         body.pack(fill="both", expand=True, padx=s(24), pady=(s(6), s(20)))
 
-        rail = tk.Frame(body, bg=pal["bg"], width=s(170))
-        rail.pack(side="left", fill="y")
-        rail.pack_propagate(False)
-
-        for key, label, sub in (
-            ("seed", "图种", "图片 + 隐藏文件"),
-            ("unpack", "图种解包", "直接拆出种子"),
-            ("phantom", "幻影坦克", "一张图两个画面"),
-            ("reveal", "幻影提取", "把藏着的画面还原"),
-            ("cut", "抠图", "主体分离 · 三视图"),
-        ):
-            self._rail_btn(rail, key, label, sub)
-
-        tk.Frame(body, bg=pal["line"], width=1).pack(side="left", fill="y", padx=(0, s(18)))
+        # 一个模块都没有时，整条侧栏（含分隔线）都不画 —— 留一条 170px 的空白
+        # 比空态说明更奇怪，用户会以为界面坏了。
+        if metas:
+            rail = tk.Frame(body, bg=pal["bg"], width=s(170))
+            rail.pack(side="left", fill="y")
+            rail.pack_propagate(False)
+            self.rail = rail
+            for meta in metas:
+                self._rail_btn(rail, meta)
+            tk.Frame(body, bg=pal["line"], width=1).pack(side="left", fill="y",
+                                                         padx=(0, s(18)))
+        else:
+            self.rail = None
 
         self.stage = tk.Frame(body, bg=pal["bg"])
         self.stage.pack(side="left", fill="both", expand=True)
 
-        if self.tab == "seed":
-            self.build_seed()
-        elif self.tab == "unpack":
-            self.build_unpack()
-        elif self.tab == "phantom":
-            self.build_phantom()
-        elif self.tab == "reveal":
-            self.build_reveal()
-        else:
-            self.build_cut()
+        self.mount()
 
-    def _rail_btn(self, parent, key, label, sub):
+    # ── 模块挂载 ──────────────────────────────────────────
+    def mount(self):
+        """把当前 tab 对应的插件画到 stage 上。
+
+        能走到这里的模块都已经过 plugin_list() 筛选（装了 + 启用 + 就绪），
+        所以这里只剩一种失败：**代码本身跑不起来**。
+        那不是「没装」，不该悄悄消失 —— 给一页带「重试加载」的说明，
+        同时把 traceback 写进 logs/plugin.log。
+        """
+        if not self._visible:
+            self._page(
+                "没有可用的模块",
+                "程序没找到任何可以显示的功能模块。\n\n"
+                "常见原因有两个：plugins\\ 目录被删掉或改名了；"
+                "或者 plugins\\manifest.json 把所有模块都关掉了。\n\n"
+                "插件目录：%s\n"
+                "恢复办法：删掉 plugins\\manifest.json 恢复默认，"
+                "再用「藏图盒.exe --plugins」确认一遍。" % self.plugins.user_root)
+            return
+
+        pid = self.tab
+        meta = next((m for m in self._visible if m.id == pid), None)
+        if meta is None:            # build() 已经归正过 tab，这里只是防御
+            self.tab = self._visible[0].id
+            self.build()
+            return
+
+        # 插件目录整个丢失时的兜底清单：实现还在本体里，不经过 manager
+        if self.plugins.meta(pid) is None and meta.builtin:
+            getattr(self, meta.builtin)()
+            return
+
+        try:
+            ok, reason = self.plugins.check(pid)
+            if not ok:
+                self.log("插件 %s 自检未通过：%s\n%s"
+                         % (pid, reason, self.plugins.last_error(pid)))
+                # 「加载都失败了」和「加载成功但自检不过」是两种事，
+                # 标题不能混着写，否则用户按「重试」也修不好。
+                title = ("「%s」加载失败" % meta.name
+                         if reason.startswith("加载失败")
+                         else "「%s」自检没通过" % meta.name)
+                self._page(title, reason, retry=True)
+                return
+            plugin = self.plugins.load(pid)
+            plugin.build(self.ctx)
+        except PluginError as exc:
+            self.log("插件 %s 加载失败：%s\n%s" % (pid, exc, getattr(exc, "detail", "")))
+            self._page("「%s」加载失败" % meta.name, str(exc), retry=True)
+        except Exception as exc:  # noqa: BLE001
+            detail = traceback.format_exc()
+            self.log("插件 %s 初始化异常：\n%s" % (pid, detail))
+            self._page("「%s」初始化出错" % meta.name,
+                       "%s: %s" % (type(exc).__name__, exc), retry=True)
+
+    def _page(self, title: str, body: str, retry: bool = False):
+        """整页说明。只在「整个程序没得用」或「某个模块代码跑不起来」时出现。
+
+        注意它**不用于**停用/未安装 —— 那两种情况模块直接不出现（见 plugin_list），
+        页面上不会留下任何「已停用」「不可用」之类的残字。
+        """
         pal = self.pal
+        box = tk.Frame(self.stage, bg=pal["bg"])
+        box.pack(fill="both", expand=True)
+        tk.Label(box, text=title, bg=pal["bg"], fg=pal["warn_ink"],
+                 font=FONTS["title"], anchor="w").pack(anchor="w", pady=(s(6), 0))
+        tk.Label(box, text=body, bg=pal["bg"], fg=pal["ink2"], font=FONTS["ui_sm"],
+                 anchor="w", justify="left", wraplength=s(680)).pack(anchor="w",
+                                                                   pady=(s(10), 0))
+        if retry:
+            bar = tk.Frame(box, bg=pal["bg"])
+            bar.pack(anchor="w", pady=(s(16), 0))
+            self._btn(bar, "重试加载", self.retry_current, primary=True).pack(side="left")
+
+    def retry_current(self):
+        """丢掉加载失败的缓存再重建 —— 用户装好缺的东西后不用重启程序。"""
+        self.plugins.unload(self.tab)
+        self.build()
+
+    def _rail_btn(self, parent, meta):
+        """一个侧栏入口。传进来的都是能用的模块 —— 没有「灰掉」这种状态。"""
+        pal = self.pal
+        key = meta.id
         active = self.tab == key
+
         bg = pal["surface"] if active else pal["bg"]
         box = tk.Frame(parent, bg=bg,
                        highlightbackground=pal["line"] if active else pal["bg"],
@@ -221,9 +344,11 @@ class App(_Base):
         box.pack(fill="x", pady=(0, 6))
         inner = tk.Frame(box, bg=bg)
         inner.pack(fill="x", padx=s(12), pady=s(9))
-        tk.Label(inner, text=label, bg=bg, fg=pal["ink"] if active else pal["ink2"],
+        tk.Label(inner, text=meta.name, bg=bg,
+                 fg=pal["ink"] if active else pal["ink2"],
                  font=FONTS["ui"], anchor="w").pack(anchor="w")
-        tk.Label(inner, text=sub, bg=bg, fg=pal["ink3"],
+        tk.Label(inner, text=meta.subtitle,
+                 bg=bg, fg=pal["ink3"],
                  font=FONTS["ui_xs"], anchor="w").pack(anchor="w")
 
         def go(_e=None):
@@ -288,6 +413,53 @@ class App(_Base):
             self.cfg["last_dir"] = str(Path(path).parent)
             P.save_config(self.cfg)
         return path
+
+    def _ask_dir(self, title="选择文件夹"):
+        initial = self.cfg.get("last_dir") or str(Path.home())
+        path = filedialog.askdirectory(parent=self, title=title, initialdir=initial)
+        if path:
+            self.cfg["last_dir"] = path
+            P.save_config(self.cfg)
+        return path
+
+    def _confirm(self, title, message, danger=False):
+        """危险操作用 askokcancel —— 默认按钮落在「取消」上，手快也不会误点。"""
+        try:
+            if danger:
+                return bool(messagebox.askokcancel(title, message, parent=self,
+                                                   icon="warning"))
+            return bool(messagebox.askyesno(title, message, parent=self))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def save_config(self):
+        P.save_config(self.cfg)
+
+    def log(self, text: str):
+        """追加到 logs/plugin.log。
+
+        插件报的错不能只弹个 toast 就完事 —— 用户回头想查「到底缺什么」时，
+        toast 早就消失了。这里留一份带时间戳的流水。
+        """
+        try:
+            P.LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(P.LOG_DIR / "plugin.log", "a", encoding="utf-8") as f:
+                f.write("[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def plugin_check(self, pid: str):
+        """内置模块的可用性自检（真插件在自己的 check() 里做）。
+
+        抠图：cv2 是硬依赖，没有它整个模块没意义；
+        onnxruntime 缺了只是没有 AI 模式，基础算法还能用，所以不算不可用。
+        """
+        if pid == "cut":
+            try:
+                import cv2  # noqa: F401
+            except Exception as exc:  # noqa: BLE001
+                return False, "缺少 OpenCV：%s" % exc
+        return True, ""
 
     def toast(self, text, err=False):
         pal = self.pal
@@ -613,328 +785,6 @@ class App(_Base):
             return
         Path(out).write_bytes(sp.tail)
         self.toast("已拆出 %s（%s）" % (fmt_size(len(sp.tail)), sp.tail_type))
-
-    # ══════════════════════════════════════════════════════
-    #  模块二：图种解包
-    # ══════════════════════════════════════════════════════
-    def build_unpack(self):
-        pal = self.pal
-        wrap = ScrollFrame(self.stage, pal)
-        wrap.pack(fill="both", expand=True)
-        root = wrap.inner
-
-        tk.Label(root, text="图种解包", bg=pal["bg"], fg=pal["ink"],
-                 font=FONTS["title"], anchor="w").pack(anchor="w")
-        tk.Label(
-            root,
-            text="拖入一张图种，直接拿到里面的文件 —— 压缩包在这里就地解开，"
-                 "不用先改后缀再去解压。种子会单独列出来，并算出 infohash 供核对。",
-            bg=pal["bg"], fg=pal["ink3"], font=FONTS["ui_xs"],
-            anchor="w", justify="left", wraplength=s(780),
-        ).pack(anchor="w", pady=(4, 14))
-
-        st = self.st_un
-        p = st["path"]
-        res = st["result"]
-        filled = None
-        thumb = None
-        if p:
-            try:
-                size = fmt_size(os.path.getsize(p))
-            except OSError:
-                size = "—"
-            if res is not None and res.has_payload:
-                line = "%s · 附加 %s · %s" % (
-                    size, fmt_size(len(res.tail)), res.payload_type or "未知")
-                note = "图片主体结束于第 %s 字节" % format(res.image_end, ",")
-            elif res is not None:
-                line = size
-                note = "末尾没有附加数据"
-            else:
-                line = size
-                note = ""
-            filled = {"name": Path(p).name, "line": line, "note": note}
-            if is_image_name(p):
-                thumb = _thumb(p, (72, 72))
-
-        self.un_card = DropCard(
-            root, pal, "图种文件", "拖入图种，或点击选择",
-            "改了后缀的图片也照样认；直接拖 .torrent / .zip 也行",
-            on_pick=lambda: self._pick(self.un_set, False, "选择图种文件"),
-            on_path=self.un_set,
-            thumb=thumb, filled=filled,
-        )
-        self.un_card.pack(fill="x")
-        self._spin("unpack", self.un_card)
-
-        self.un_advice = tk.Frame(root, bg=pal["bg"])
-        self.un_advice.pack(fill="x", pady=(12, 0))
-
-        bar = tk.Frame(root, bg=pal["bg"])
-        bar.pack(fill="x", pady=(12, 0))
-        self.un_btn_tor = self._btn(bar, "导出种子", self.un_save_torrent, primary=True)
-        self.un_btn_all = self._btn(bar, "全部导出", self.un_save_all)
-        self.un_btn_raw = self._btn(bar, "附加数据另存", self.un_save_tail)
-        self.un_bar = bar
-
-        self.un_count = tk.Label(bar, text="", bg=pal["bg"], fg=pal["ink3"],
-                                 font=FONTS["ui_xs"])
-        self.un_count.pack(side="right")
-
-        self.un_list = tk.Frame(root, bg=pal["bg"])
-        self.un_list.pack(fill="x", pady=(14, 0))
-
-        tk.Label(
-            root,
-            text="解包只读不写：不会改动你拖进来的那张图。"
-                 "种子里的 infohash 是 info 段的 SHA-1，拿去任何站点搜一下就能对上。",
-            bg=pal["bg"], fg=pal["ink3"], font=FONTS["ui_xs"],
-            anchor="w", justify="left", wraplength=s(780),
-        ).pack(anchor="w", pady=(14, 6))
-
-        self._un_render()
-
-    # -- 状态 → 界面 --------------------------------------------------
-    def un_set(self, path):
-        self.tasks.submit(
-            "unpack",
-            fn=lambda: unpack.unpack(path),
-            on_ok=lambda res: self._un_done(path, res),
-            on_err=lambda exc: self._un_fail(path, exc),
-        )
-
-    def _un_done(self, path, res):
-        self.st_un.update(path=path, result=res, error="")
-        self.build()
-
-        if not res.has_payload:
-            self.toast("这张图后面没有附加数据", True)
-        elif res.entries:
-            self.toast("已拆出 %d 个文件" % len(res.entries))
-        elif res.warning:
-            self.toast(res.warning, True)
-
-    def _un_fail(self, path, exc):
-        self.st_un.update(path=path, result=None, error=str(exc))
-        self.build()
-        self.toast(str(exc), True)
-
-    def _un_sync_buttons(self, res):
-        """没东西可导出的按钮就别摆着 —— 点了只会提示「没有可导出的文件」。"""
-        pairs = [
-            (self.un_btn_tor, res is not None and bool(res.entries)),
-            (self.un_btn_all, res is not None and len(res.entries) > 1),
-            (self.un_btn_raw, res is not None and bool(res.tail)),
-        ]
-        for w, _ in pairs:
-            w.pack_forget()
-        for w, show in pairs:
-            if show:
-                w.pack(side="left", padx=(0, 8))
-
-    def _un_render(self):
-        pal = self.pal
-        for box in (self.un_advice, self.un_list):
-            for w in box.winfo_children():
-                w.destroy()
-
-        st = self.st_un
-        res = st["result"]
-        self.un_count.config(text="")
-        self._un_sync_buttons(res)
-
-        if st["error"]:
-            advice_row(self.un_advice, pal, "bad", "这个文件打不开", "",
-                       st["error"]).pack(fill="x")
-            return
-
-        if res is None:
-            tk.Label(
-                self.un_advice, text="拖一个图种进来就会自动拆开。",
-                bg=pal["bg"], fg=pal["ink3"], font=FONTS["ui_xs"], anchor="w",
-            ).pack(anchor="w")
-            return
-
-        # ── 没有附加数据 ──────────────────────────────
-        if not res.has_payload:
-            advice_row(
-                self.un_advice, pal, "warn", "这张图里没有藏东西",
-                res.image_kind or "未知格式",
-                "图片本体到第 %s 字节就结束了，后面一个字节都没有。"
-                "图种的附加数据必须挂在这个位置之后；如果对方发来的是原图，那就是真没藏。"
-                % format(res.image_end, ","),
-            ).pack(fill="x")
-            return
-
-        # ── 有附加数据 ────────────────────────────────
-        tq = res.torrents
-        bad = res.bad_crc
-        info = res.torrent
-
-        lines = ["图片本体 %s + 附加数据 %s"
-                 % (fmt_size(res.image_end), fmt_size(len(res.tail)))]
-        if res.offset_fixed:
-            lines.append("压缩包的偏移已还原 —— 单独拿出来也能直接双击打开")
-        if res.entries:
-            lines.append("CRC 全部校验通过" if bad == 0
-                         else "有 %d 个文件的 CRC 对不上，图种可能在传输中被改坏了" % bad)
-        if info is not None:
-            lines.append("种子：%s · %d 个文件 · 共 %s"
-                         % (info.name or "（无名）", info.files, fmt_size(info.size)))
-            if info.tracker_host:
-                lines.append("Tracker：%s" % info.tracker_host)
-            if info.infohash:
-                lines.append("infohash：%s" % info.infohash)
-        for n in res.notes:
-            lines.append(n)
-        if res.warning:
-            lines.append(res.warning)
-
-        if res.warning:
-            level = "warn"
-        elif tq:
-            level = "ok"
-        elif res.entries:
-            level = "ok" if bad == 0 else "warn"
-        else:
-            level = "warn"
-        dot = "!" if level == "warn" else ""
-
-        if tq:
-            title = ("解出 %d 个文件，其中 %d 个是种子" % (len(res.entries), len(tq))
-                     if len(res.entries) > 1 else "这是一个种子")
-        elif res.entries:
-            title = "解出 %d 个文件" % len(res.entries)
-        else:
-            title = res.warning or "附加数据的类型认不出来"
-
-        advice_row(self.un_advice, pal, level, title, res.payload_type or dot,
-                   "\n".join(lines)).pack(fill="x")
-
-        if not res.entries:
-            return
-
-        # ── 文件列表 ──────────────────────────────────
-        total = sum(e.size for e in res.entries)
-        self.un_count.config(text="共 %d 个文件 · %s"
-                                  % (len(res.entries), fmt_size(total)))
-
-        card = tk.Frame(self.un_list, bg=pal["surface"],
-                        highlightbackground=pal["line"], highlightthickness=1)
-        card.pack(fill="x")
-
-        head = tk.Frame(card, bg=pal["sunken"])
-        head.pack(fill="x")
-        tk.Label(head, text="拆出来的文件", bg=pal["sunken"], fg=pal["ink2"],
-                 font=FONTS["ui_sm"], anchor="w").pack(side="left", padx=s(12), pady=s(6))
-        tk.Label(head, text="%d 个 · %s" % (len(res.entries), fmt_size(total)),
-                 bg=pal["sunken"], fg=pal["ink3"], font=FONTS["ui_xs"]).pack(
-            side="right", padx=s(12))
-
-        for i, e in enumerate(res.entries):
-            self._un_row(card, i, e)
-
-    def _un_row(self, parent, idx, entry):
-        pal = self.pal
-        if idx:
-            tk.Frame(parent, bg=pal["line"], height=1).pack(fill="x")
-
-        row = tk.Frame(parent, bg=pal["surface"])
-        row.pack(fill="x")
-        inner = tk.Frame(row, bg=pal["surface"])
-        inner.pack(fill="x", padx=s(12), pady=s(7))
-
-        tag = "TOR" if entry.is_torrent else (
-            (Path(entry.name).suffix[1:4] or "file").upper())
-        tk.Label(inner, text=tag, bg=pal["sunken"], fg=pal["ink2"],
-                 font=FONTS["ui_xs"], width=4, pady=s(2)).pack(side="left",
-                                                              padx=(0, s(10)))
-
-        btn = tk.Label(inner, text="保存", bg=pal["surface"], fg=pal["ink2"],
-                       font=FONTS["ui_xs"], cursor="hand2", padx=s(9), pady=s(3),
-                       highlightbackground=pal["line"], highlightthickness=1)
-        btn.pack(side="right")
-        btn.bind("<Button-1>", lambda e: self.un_save_one(entry))
-        btn.bind("<Enter>", lambda e: btn.configure(bg=pal["sunken"]))
-        btn.bind("<Leave>", lambda e: btn.configure(bg=pal["surface"]))
-
-        tk.Label(inner, text=fmt_size(entry.size), bg=pal["surface"], fg=pal["ink3"],
-                 font=FONTS["ui_xs"]).pack(side="right", padx=s(10))
-
-        name = _short(entry.name)
-        tk.Label(
-            inner, text=name, bg=pal["surface"],
-            fg=pal["warn_ink"] if not entry.crc_ok else pal["ink"],
-            font=FONTS["ui_sm"], anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-
-    # -- 导出 ---------------------------------------------------------
-    def _un_result(self):
-        res = self.st_un["result"]
-        if res is None or not res.entries:
-            self.toast("还没有可以导出的文件。", True)
-            return None
-        return res
-
-    def un_save_one(self, entry):
-        if not entry.data:
-            self.toast("这项读不出来，没法导出。", True)
-            return
-        ext = Path(entry.name).suffix or ".bin"
-        out = self._ask_save(unpack.safe_leaf(entry.name), ext)
-        if out:
-            try:
-                unpack.save_entry(entry, out)
-                self.toast("已保存 %s" % fmt_size(entry.size))
-            except Exception as exc:  # noqa: BLE001
-                self.toast("写文件失败：%s" % exc, True)
-
-    def un_save_torrent(self):
-        res = self._un_result()
-        if res is None:
-            return
-        tq = res.torrents or res.entries
-        if len(tq) == 1:
-            self.un_save_one(tq[0])
-            return
-        folder = filedialog.askdirectory(parent=self, title="种子导出到哪个文件夹")
-        if not folder:
-            return
-        try:
-            n = unpack.save_all(tq, folder)
-            self.toast("已导出 %d 个文件" % n)
-        except Exception as exc:  # noqa: BLE001
-            self.toast("导出失败：%s" % exc, True)
-
-    def un_save_all(self):
-        res = self._un_result()
-        if res is None:
-            return
-        folder = filedialog.askdirectory(parent=self, title="解出来的文件放到哪个文件夹")
-        if not folder:
-            return
-        try:
-            n = unpack.save_all(res.entries, folder)
-            self.toast("已导出 %d 个文件" % n)
-        except Exception as exc:  # noqa: BLE001
-            self.toast("导出失败：%s" % exc, True)
-
-    def un_save_tail(self):
-        res = self.st_un["result"]
-        if res is None or not res.tail:
-            self.toast("没有附加数据可导出。", True)
-            return
-        ext = res.payload_ext or ".bin"
-        out = self._ask_save("%s_附加数据%s" % (_stem(res.source), ext), ext)
-        if not out:
-            return
-        try:
-            Path(out).write_bytes(res.tail_clean)
-            self.toast("已导出 %s%s" % (
-                fmt_size(len(res.tail_clean)),
-                "（偏移已还原，能直接打开）" if res.offset_fixed else ""))
-        except Exception as exc:  # noqa: BLE001
-            self.toast("写文件失败：%s" % exc, True)
 
     # ══════════════════════════════════════════════════════
     #  模块三：幻影坦克

@@ -1,0 +1,11 @@
+{
+  "id": "unpack",
+  "name": "图种解包",
+  "subtitle": "直接拆出种子",
+  "order": 20,
+  "api_version": "1.0",
+  "entry": "plugin.py",
+  "description": "拖入图种，就地解开压缩包，单独导出种子",
+  "requires": [],
+  "probe": []
+}

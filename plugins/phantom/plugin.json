@@ -1,0 +1,10 @@
+{
+  "id": "phantom",
+  "name": "幻影坦克",
+  "subtitle": "一张图两个画面",
+  "order": 30,
+  "api_version": "1.0",
+  "builtin": "build_phantom",
+  "description": "靠 alpha 通道让一张 PNG 在深浅底色下显示两张图",
+  "requires": []
+}

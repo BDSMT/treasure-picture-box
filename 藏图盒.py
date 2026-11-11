@@ -44,6 +44,107 @@ def _fatal(title: str, body: str):
         sys.stderr.write("%s\n%s\n" % (title, body))
 
 
+def _say(title: str, body: str):
+    """给窗口版程序用的「打印」。
+
+    打包成 console=False 之后 sys.stdout 是 None，直接 print 会抛 AttributeError ——
+    开发时看不出来，打包后一跑 --plugins 就静默崩掉。所以这里必须防一手。
+    """
+    try:
+        if sys.stdout is not None:
+            print(body)
+    except Exception:  # noqa: BLE001
+        pass
+    if not getattr(sys, "frozen", False) or "--quiet" in sys.argv:
+        return
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        r = tk.Tk()
+        r.withdraw()
+        messagebox.showinfo(title, body)
+        r.destroy()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def plugin_roots() -> tuple:
+    """(用户插件目录, [随包插件目录])。
+
+    打包后随包的插件在 _internal/plugins，用户装的在程序目录/plugins。
+    两者的优先级由 loader 决定：用户的覆盖随包的。
+    """
+    user = ROOT / "plugins"
+    bundled = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        p = Path(base) / "plugins"
+        try:
+            if p.resolve() != user.resolve():
+                bundled.append(p)
+        except OSError:
+            bundled.append(p)
+    return user, bundled
+
+
+def _plugins_cli() -> int:
+    """`藏图盒.exe --plugins` —— 不启动界面，只看插件状态。
+
+    打包后是窗口程序，没有控制台，print 出去就没了。
+    所以报告同时写 logs/plugins.log，并用弹窗显示一份 —— 用户点了能看到。
+    """
+    from cangtu.loader import PluginManager
+
+    user, bundled = plugin_roots()
+    pm = PluginManager(user, bundled)
+    pm.discover()
+
+    lines = ["插件目录：%s" % user]
+    if bundled:
+        lines.append("随包目录：%s" % bundled[0])
+    lines.append("")
+    if not pm.metas():
+        lines.append("一个插件都没找到 —— 程序目录下的 plugins\\ 可能被删了。")
+    else:
+        lines.extend("  " + s for s in pm.report())
+        lines.append("")
+        lines.append("共 %d 个模块。停用某个插件：改 plugins\\manifest.json 里对应的 enabled。"
+                     % len(pm.metas()))
+    body = "\n".join(lines)
+    try:
+        from core.paths import write_log
+
+        write_log("plugins.log", body)
+    except Exception:  # noqa: BLE001
+        pass
+    _say("藏图盒 · 插件状态", body)
+    return 0
+
+
+def _install_cli(path: str, remove: bool = False) -> int:
+    from cangtu.loader import PluginError, PluginManager
+
+    user, bundled = plugin_roots()
+    pm = PluginManager(user, bundled)
+    pm.discover()
+    try:
+        if remove:
+            pm.uninstall(pm.find(path) or path)
+            _say("藏图盒 · 卸载插件", "已卸载「%s」。" % path)
+        else:
+            pid = pm.install(path)
+            _say("藏图盒 · 安装插件",
+                 "已安装「%s」，重启藏图盒就能在侧栏看到。" % pid)
+    except PluginError as exc:
+        _say("藏图盒", "操作失败：%s" % exc)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        _say("藏图盒", "操作失败：%s: %s" % (type(exc).__name__, exc))
+        return 1
+    return 0
+
+
 def _selftest() -> int:
     """`藏图盒.exe --selftest`
 
@@ -113,6 +214,38 @@ def _selftest() -> int:
                 log("拖放: ✅ 可用")
             except Exception as exc:  # noqa: BLE001
                 log("拖放: ❌ %s" % exc)
+
+        # ── 插件框架 ──────────────────────────────────
+        # 放在算法测试之前：这块要证明的是「启动阶段不为重依赖付费」，
+        # 等抠图自检把 cv2 import 进来之后再看就没意义了。
+        try:
+            import time as _t
+
+            from cangtu.loader import PluginManager
+
+            _user, _bundled = plugin_roots()
+            _pm = PluginManager(_user, _bundled)
+            _metas = _pm.discover()
+            log("插件: 发现 %d 个（%s）"
+                % (len(_metas), ", ".join(m.id for m in _metas)))
+            for line in _pm.report():
+                log("  " + line)
+            if "unpack" in [m.id for m in _metas]:
+                _t0 = _t.time()
+                _p = _pm.load("unpack")
+                log("按需加载: unpack -> %s（%.2f 秒）"
+                    % (type(_p).__name__, _t.time() - _t0))
+                # 这条是关键证据：翻遍所有清单、把 unpack 加载起来之后，
+                # 抠图那 100 MB 的 cv2 依然没被 import。
+                log("懒加载: 此时 cv2 已导入=%s（应为 False）" % ("cv2" in sys.modules))
+                _ok, _why = _pm.check("unpack")
+                log("unpack 自检: %s%s" % ("✅" if _ok else "❌", "" if _ok else _why))
+                _pm.unload("unpack")
+                log("卸载: 模块缓存已清=%s"
+                    % ("_cangtu_plugin_unpack" not in sys.modules))
+        except Exception:  # noqa: BLE001
+            log("插件: ❌\n" + traceback.format_exc())
+
 
         tmp = Path(tempfile.mkdtemp(prefix="seedbox_"))
         try:
@@ -326,14 +459,18 @@ def _selftest() -> int:
                        ctypes.windll.user32.GetSystemMetrics(1)))
                 log("主窗口: %dx%d（含标题栏）"
                     % (app.winfo_width(), app.winfo_height()))
+                # 只遍历「侧栏真的会显示」的模块 —— 停用/未安装的不该出现在侧栏，
+                # 也就不该在这里出现。
+                shown = [m.id for m in app.plugin_list()]
                 tabs = []
-                for key in ("seed", "unpack", "phantom", "reveal", "cut"):
+                for key in shown:
                     app.tab = key
                     app.build()
                     app.update()
                     tabs.append(key)
                 app.destroy()
-                log("主界面: ✅ 五个模块均可创建（%s）" % ", ".join(tabs))
+                log("主界面: ✅ %d 个模块均可创建（%s）"
+                    % (len(tabs), ", ".join(tabs)))
             except Exception:  # noqa: BLE001
                 log("主界面: ❌\n" + traceback.format_exc())
 
@@ -348,6 +485,17 @@ def _selftest() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return _selftest()
+
+    if "--plugins" in sys.argv:
+        return _plugins_cli()
+
+    for flag, remove in (("--install-plugin", False), ("--uninstall-plugin", True)):
+        if flag in sys.argv:
+            i = sys.argv.index(flag)
+            if i + 1 >= len(sys.argv):
+                _say("藏图盒", "用法：%s <插件包路径或插件 id>" % flag)
+                return 2
+            return _install_cli(sys.argv[i + 1], remove)
 
     try:
         import tkinter  # noqa: F401

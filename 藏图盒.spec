@@ -48,12 +48,19 @@ a = Analysis(
     [os.path.join(ROOT, "藏图盒.py")],
     pathex=pathex,
     binaries=[],
-    datas=dnd_datas,
+    # 插件目录随包带上，落在 _internal/plugins。
+    # 它是「出厂预装」的那一份：用户目录（程序目录/plugins）优先，
+    # 所以删掉这里的不会丢失能力 —— 用户那边有同名 id 就会被覆盖。
+    # 刻意是数据文件而不是 hiddenimports：插件要在运行期按路径 import，
+    # 让 PyInstaller 静态分析它们，反而会被打进 PYZ 而丢失源码路径。
+    # 里面的 manifest.json 是运行期状态，build.py 在打包前会先删掉它。
+    datas=dnd_datas + [(os.path.join(ROOT, "plugins"), "plugins")],
     hiddenimports=[
         "tkinterdnd2", "tkinterdnd2.TkinterDnD",
         "core.paths", "core.sniff", "core.seed", "core.phantom",
         "core.reveal", "core.imageio", "core.unpack", "core.zipfix",
         "core.matting",
+        "cangtu.api", "cangtu.loader", "cangtu.tasks", "cangtu.spinner",
         "ui.app", "ui.theme", "ui.widgets",
         "PIL._tkinter_finder",
     ],

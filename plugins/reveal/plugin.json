@@ -1,0 +1,10 @@
+{
+  "id": "reveal",
+  "name": "幻影提取",
+  "subtitle": "把藏着的画面还原",
+  "order": 40,
+  "api_version": "1.0",
+  "builtin": "build_reveal",
+  "description": "把幻影坦克图拆回两张画面",
+  "requires": []
+}

@@ -1,0 +1,10 @@
+{
+  "id": "seed",
+  "name": "图种",
+  "subtitle": "图片 + 隐藏文件",
+  "order": 10,
+  "api_version": "1.0",
+  "builtin": "build_seed",
+  "description": "图片原始字节在前，要藏的文件原封不动接在后面",
+  "requires": []
+}

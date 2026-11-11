@@ -1,0 +1,11 @@
+{
+  "id": "cut",
+  "name": "抠图",
+  "subtitle": "主体分离 · 三视图",
+  "order": 50,
+  "api_version": "1.0",
+  "builtin": "build_cut",
+  "description": "识别画面主体（含发丝），输出原图 / 抠出元素 / 衬底三视图",
+  "requires": [],
+  "probe": ["cv2"]
+}

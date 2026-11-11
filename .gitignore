@@ -20,6 +20,10 @@ logs/
 output/
 config.json
 
+# 插件运行期状态（装了哪些、停用了哪些）与插件私有依赖
+plugins/manifest.json
+plugins/*/vendor/
+
 # 演示素材（示例输入，不进仓库，本地 E:\zancun\bili\演示 保留）
 assets/
 

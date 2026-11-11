@@ -31,7 +31,7 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001  被重定向或老版本 Python，忽略即可
         pass
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 APP_NAME = "藏图盒"
 BUILD_DIR = "build"
 RELEASE_DIR = "release"
@@ -46,6 +46,9 @@ SPEC = ROOT / ("%s.spec" % APP_NAME)
 # 刻意不含 README.md：它引用了 docs/ 里的截图，而 docs 不进分发包，
 # 放进去只会显示成破图。下载用户需要的是「先读我」和「使用说明」。
 EXTRA_FILES = ["使用说明.md", "LICENSE"]
+
+# 插件清单的固定文件名（运行期状态，不进包 —— 见 clean_plugin_state）
+MANIFEST = "manifest.json"
 
 READ_ME = """\
 藏图盒 v{ver}
@@ -86,6 +89,17 @@ READ_ME = """\
 
   抠图      把画面主体抠出来，左中右三张：原图、抠出的元素、衬底效果。
             衬白底还是黑底自动选，深色主体配白底、浅色配黑底，对比最大。
+
+
+【模块是插件，看不见就是不能用】
+
+  侧栏那几个模块各是一个插件，清单在 plugins\\ 里。
+  没装、被关掉、缺运行组件的模块直接不出现 —— 没有灰掉的入口，也没有提示文案。
+  侧栏列出来的，就是这台机器上当下真能用的。
+
+  看状态：  藏图盒.exe --plugins
+  装插件：  藏图盒.exe --install-plugin 插件包.zip
+  关模块：  改 plugins\\manifest.json 里对应项的 enabled
 
 
 【关于抠图的 AI 模型】
@@ -201,11 +215,25 @@ def ensure_deps() -> None:
     say("安装完成")
 
 
+def clean_plugin_state() -> None:
+    """打包前删掉 plugins/manifest.json。
+
+    它记的是「这台机器上谁被关掉了」，属于运行期状态。
+    本机调试时关过某个模块，这份状态要是被带进包里，
+    用户装好就会莫名其妙少一个功能 —— 而且完全看不出原因。
+    """
+    p = ROOT / "plugins" / MANIFEST
+    if p.exists():
+        p.unlink()
+        say("已移除 plugins/%s（运行期状态不进包）" % MANIFEST)
+
+
 # ── 2. 打包 ───────────────────────────────────────────────
 def run_pyinstaller() -> None:
     step("PyInstaller 打包")
     if not SPEC.exists():
         die("找不到 %s" % SPEC.name)
+    clean_plugin_state()
 
     # 每次都用干净的输出目录，避免 COLLECT 删旧目录时被占用
     rmtree(DIST.parent, "构建目录")
