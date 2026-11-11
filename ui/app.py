@@ -19,6 +19,8 @@ from core import matting, phantom, reveal, seed, unpack
 from core.seed import payload_kind
 from core.imageio import LANCZOS, fit_contain, open_rgba, over_background, save_png
 from core.sniff import is_image_name, sniff
+from cangtu.spinner import Spinner, readable_on
+from cangtu.tasks import TaskRunner
 from ui.theme import FONTS, palette, s, scale, setup_scale
 from ui.widgets import (Check, DropCard, PreviewTile, ScrollFrame, Slider,
                         advice_row, fmt_size)
@@ -133,6 +135,9 @@ class App(_Base):
                       "auto": bool(self.cfg.get("reveal_auto", True))}
         self.st_cu = {"path": None, "backdrop": "auto"}
 
+        # 异步执行器：所有耗时处理都走它，期间的转圈也由它管
+        self.tasks = TaskRunner(self)
+
         self._refs = []
         self.build()
 
@@ -142,6 +147,10 @@ class App(_Base):
     def build(self):
         pal = palette(self.theme)
         self.pal = pal
+        # 界面要整个重建：在途任务的结果必须作废，否则任务跑完回来
+        # 会往新控件上写旧数据；旧 spinner 也马上会被 destroy，引用一起丢掉。
+        self.tasks.invalidate()
+        self.tasks.detach_spinners()
         for w in self.winfo_children():
             w.destroy()
 
@@ -289,6 +298,57 @@ class App(_Base):
         lab.place(relx=0.5, rely=1.0, y=-26, anchor="s")
         self.after(3200, lambda: (lab.destroy() if lab.winfo_exists() else None))
 
+    def _spin(self, key, host):
+        """在控件中央挂一个转圈，并交给 tasks 自动起停。
+
+        host 可以是 PreviewTile（用它内部的 canvas，转圈正好压在图上），
+        也可以是任意 Frame（用它的 body 或它自己）。
+
+        颜色按宿主底色自己挑：预览块的底是固定的白/黑/棋盘格，不跟主题走，
+        白底上画白圈等于没画。
+        """
+        target = getattr(host, "canvas", None) or getattr(host, "body", None) or host
+        try:
+            bg = str(target.cget("bg"))
+        except Exception:      # noqa: BLE001
+            bg = self.pal["surface"]
+
+        # PreviewTile 里有一行「等待生成」占位文字，转圈正好压在它上面。
+        # 转圈期间先把文字清空，结束再恢复 —— 有图时 _redraw 会自己再隐藏它。
+        empty = getattr(host, "_empty", None)
+        blank = None
+        if empty is not None:
+            try:
+                blank = empty.cget("text")
+            except Exception:      # noqa: BLE001
+                empty = None
+
+        def _show():
+            if empty is not None:
+                try:
+                    empty.configure(text="")
+                except Exception:      # noqa: BLE001
+                    pass
+
+        def _hide():
+            if empty is not None:
+                try:
+                    empty.configure(text=blank)
+                except Exception:      # noqa: BLE001
+                    pass
+
+        sp = Spinner(target, size=s(30), color=readable_on(bg), bg=bg,
+                     on_show=_show, on_hide=_hide)
+        self.tasks.attach_spinner(key, sp)
+        return sp
+
+    def _alive(self, key, widget: str) -> bool:
+        """异步结果回来时，确认界面还停在那个模块、控件也还在。
+
+        用户可能已经切走了，这时结果直接丢掉，不要往别的模块上写。
+        """
+        return self.tab == key and hasattr(self, widget)
+
     # ══════════════════════════════════════════════════════
     #  模块一：图种
     # ══════════════════════════════════════════════════════
@@ -333,6 +393,7 @@ class App(_Base):
             size=(s(560), s(190)),
         )
         self.seed_preview.pack(fill="x", pady=(16, 0))
+        self._spin("seed", self.seed_preview)
         self._seed_refresh_preview()
 
         tk.Label(
@@ -495,22 +556,33 @@ class App(_Base):
         if not p:
             self.seed_preview.set_image(None)
             return
-        try:
-            self.seed_preview.set_image(open_rgba(p).convert("RGB"))
-        except Exception:  # noqa: BLE001
-            self.seed_preview.set_image(None)
+        self.tasks.submit(
+            "seed",
+            fn=lambda: open_rgba(p).convert("RGB"),
+            on_ok=self._seed_show,
+            on_err=lambda exc: self._seed_show(None),
+        )
+
+    def _seed_show(self, im):
+        if not self._alive("seed", "seed_preview"):
+            return
+        self.seed_preview.set_image(im)
 
     def seed_do_pack(self):
         st = self.st_seed
         if not (st["cover"] and st["pay"]):
             self.toast("两张都还没选全。", True)
             return
-        try:
-            res = seed.pack(st["cover"], st["pay"])
-        except Exception as exc:  # noqa: BLE001
-            self.toast(str(exc), True)
-            return
+        cover, pay = st["cover"], st["pay"]
+        self.tasks.submit(
+            "seed",
+            fn=lambda: seed.pack(cover, pay),
+            on_ok=self._seed_packed,
+            on_err=lambda exc: self.toast(str(exc), True),
+        )
 
+    def _seed_packed(self, res):
+        st = self.st_seed
         ext = _ext(st["cover"]) or ("." + (st["kind"] or "jpg").lower())
         default = "%s_seed%s" % (_stem(st["cover"]), ext)
         out = self._ask_save(default, ext)
@@ -585,13 +657,15 @@ class App(_Base):
             if is_image_name(p):
                 thumb = _thumb(p, (72, 72))
 
-        DropCard(
+        self.un_card = DropCard(
             root, pal, "图种文件", "拖入图种，或点击选择",
             "改了后缀的图片也照样认；直接拖 .torrent / .zip 也行",
             on_pick=lambda: self._pick(self.un_set, False, "选择图种文件"),
             on_path=self.un_set,
             thumb=thumb, filled=filled,
-        ).pack(fill="x")
+        )
+        self.un_card.pack(fill="x")
+        self._spin("unpack", self.un_card)
 
         self.un_advice = tk.Frame(root, bg=pal["bg"])
         self.un_advice.pack(fill="x", pady=(12, 0))
@@ -622,14 +696,14 @@ class App(_Base):
 
     # -- 状态 → 界面 --------------------------------------------------
     def un_set(self, path):
-        try:
-            res = unpack.unpack(path)
-        except Exception as exc:  # noqa: BLE001
-            self.st_un.update(path=path, result=None, error=str(exc))
-            self.build()
-            self.toast(str(exc), True)
-            return
+        self.tasks.submit(
+            "unpack",
+            fn=lambda: unpack.unpack(path),
+            on_ok=lambda res: self._un_done(path, res),
+            on_err=lambda exc: self._un_fail(path, exc),
+        )
 
+    def _un_done(self, path, res):
         self.st_un.update(path=path, result=res, error="")
         self.build()
 
@@ -639,6 +713,11 @@ class App(_Base):
             self.toast("已拆出 %d 个文件" % len(res.entries))
         elif res.warning:
             self.toast(res.warning, True)
+
+    def _un_fail(self, path, exc):
+        self.st_un.update(path=path, result=None, error=str(exc))
+        self.build()
+        self.toast(str(exc), True)
 
     def _un_sync_buttons(self, res):
         """没东西可导出的按钮就别摆着 —— 点了只会提示「没有可导出的文件」。"""
@@ -930,6 +1009,7 @@ class App(_Base):
         self.pt_right = PreviewTile(pv, pal, "深色背景", "藏着的那张",
                                     bg_rgb=(10, 10, 12), size=(s(420), s(232)))
         self.pt_right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        self._spin("phantom", self.pt_left)
 
         self.pt_advice = tk.Frame(root, bg=pal["bg"])
         self.pt_advice.pack(fill="x", pady=(12, 0))
@@ -1005,35 +1085,44 @@ class App(_Base):
                 pass
             return
 
-        try:
-            self.pt_eq.config(text="正在合成…")
-            self.update_idletasks()
+        self.pt_eq.config(text="正在合成…")
+        fg_path, bg_path = st["fg"], st["bg"]
+        bright = self.pt_bright.get() / 100.0
+        boost = bool(self.pt_boost.get())
 
-            fg = open_rgba(st["fg"])
-            bg = open_rgba(st["bg"])
-            res = phantom.compose(
-                fg, bg,
-                bright=self.pt_bright.get() / 100.0,
-                boost=bool(self.pt_boost.get()),
-                max_side=PREVIEW_SIDE,
+        # 拖亮度滑块会连续触发，代数机制会把上一轮作废，
+        # 不会让任务排长队、也不会让旧结果盖掉新结果。
+        def job():
+            return phantom.compose(
+                open_rgba(fg_path), open_rgba(bg_path),
+                bright=bright, boost=boost, max_side=PREVIEW_SIDE,
             )
-            st["result"] = res
 
-            self.pt_left.set_image(over_background(res.image, (255, 255, 255)))
-            self.pt_right.set_image(over_background(res.image, (8, 8, 10)))
-            self.pt_eq.config(text="输出 %d × %d · PNG" % (res.width, res.height))
+        self.tasks.submit("phantom", job, on_ok=self._pt_done,
+                          on_err=self._pt_fail)
 
-            for w in self.pt_advice.winfo_children():
-                w.destroy()
-            for lv, title, quant, desc in phantom.advice(res.stat):
-                advice_row(self.pt_advice, pal, lv, title, quant, desc).pack(
-                    fill="x", pady=(0, 6))
-        except Exception as exc:  # noqa: BLE001
-            self.pt_eq.config(text="合成失败")
-            for w in self.pt_advice.winfo_children():
-                w.destroy()
-            advice_row(self.pt_advice, pal, "bad", "合成失败", "",
-                       str(exc)).pack(fill="x")
+    def _pt_done(self, res):
+        if not self._alive("phantom", "pt_left"):
+            return
+        self.st_pt["result"] = res
+        self.pt_left.set_image(over_background(res.image, (255, 255, 255)))
+        self.pt_right.set_image(over_background(res.image, (8, 8, 10)))
+        self.pt_eq.config(text="输出 %d × %d · PNG" % (res.width, res.height))
+
+        for w in self.pt_advice.winfo_children():
+            w.destroy()
+        for lv, title, quant, desc in phantom.advice(res.stat):
+            advice_row(self.pt_advice, self.pal, lv, title, quant, desc).pack(
+                fill="x", pady=(0, 6))
+
+    def _pt_fail(self, exc):
+        if not self._alive("phantom", "pt_left"):
+            return
+        self.pt_eq.config(text="合成失败")
+        for w in self.pt_advice.winfo_children():
+            w.destroy()
+        advice_row(self.pt_advice, self.pal, "bad", "合成失败", "",
+                   str(exc)).pack(fill="x")
 
     def pt_do_save(self):
         st = self.st_pt
@@ -1044,20 +1133,25 @@ class App(_Base):
         out = self._ask_save(default, ".png")
         if not out:
             return
-        try:
-            fg = open_rgba(st["fg"])
-            bg = open_rgba(st["bg"])
+        fg_path, bg_path = st["fg"], st["bg"]
+        bright = self.pt_bright.get() / 100.0
+        boost = bool(self.pt_boost.get())
+        max_side = int(self.cfg.get("max_side", 2600))
+
+        def job():
             res = phantom.compose(
-                fg, bg,
-                bright=self.pt_bright.get() / 100.0,
-                boost=bool(self.pt_boost.get()),
-                max_side=int(self.cfg.get("max_side", 2600)),
+                open_rgba(fg_path), open_rgba(bg_path),
+                bright=bright, boost=boost, max_side=max_side,
             )
             save_png(res.image, out)
-            self.toast("已生成 %s，换底色就能看到另一张"
-                       % fmt_size(os.path.getsize(out)))
-        except Exception as exc:  # noqa: BLE001
-            self.toast("保存失败：%s" % exc, True)
+            return out
+
+        self.tasks.submit(
+            "phantom", job,
+            on_ok=lambda p: self.toast(
+                "已生成 %s，换底色就能看到另一张" % fmt_size(os.path.getsize(p))),
+            on_err=lambda e: self.toast("保存失败：%s" % e, True),
+        )
 
     # ══════════════════════════════════════════════════════
     #  模块四：幻影提取
@@ -1123,6 +1217,7 @@ class App(_Base):
         self.ex_right = PreviewTile(pv, pal, "黑底提亮", "隐藏的那张",
                                     bg_rgb=(10, 10, 12), size=(s(420), s(232)))
         self.ex_right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        self._spin("reveal", self.ex_left)
 
         self.ex_note = tk.Label(
             root, text="拖入一张幻影坦克图就会自动分析。", bg=pal["bg"],
@@ -1163,28 +1258,57 @@ class App(_Base):
             return                      # 界面已经切走，控件不在了
         if not st["path"]:
             return
-        try:
-            im = open_rgba(st["path"])
+        path, auto, cur_factor = st["path"], st["auto"], st["factor"]
+
+        # 一次任务做完「读图 + 分析 + 自动提亮 + 渲染」，
+        # 不分两段提交，否则转圈会 stop 完又 start，闪一下。
+        def job():
+            im = open_rgba(path)
             an = reveal.analyze(im)
-            self._ex_stat = an
-            self._ex_img = im
+            f = reveal.auto_reveal(im) if (auto and an.phantom) else cur_factor
+            views = None
+            if an.phantom:
+                work = im
+                if max(im.size) > PREVIEW_SIDE:
+                    r = PREVIEW_SIDE / max(im.size)
+                    work = im.resize((max(1, round(im.size[0] * r)),
+                                      max(1, round(im.size[1] * r))), LANCZOS)
+                views = (reveal.build_fg(work), reveal.build_bg(work, f))
+            return im, an, f, views
 
-            if not an.phantom:
-                self.ex_left.set_image(None)
-                self.ex_right.set_image(None)
-                self.ex_note.config(text=reveal.verdict(an, im, st["factor"]),
-                                    fg=self.pal["warn_ink"])
-                return
+        self.tasks.submit("reveal", job, on_ok=self._ex_ready,
+                          on_err=self._ex_fail)
 
-            if st["auto"]:
-                f = reveal.auto_reveal(im)
-                st["factor"] = f
-                self.ex_factor.set(f)
-                self.ex_lbl.config(text="%.1f×" % f)
+    def _ex_ready(self, payload):
+        if not self._alive("reveal", "ex_left"):
+            return
+        im, an, f, views = payload
+        self._ex_stat = an
+        self._ex_img = im
+        st = self.st_ex
 
-            self._ex_apply(recompute=True, an=an, im=im)
-        except Exception as exc:  # noqa: BLE001
-            self.ex_note.config(text="读取失败：%s" % exc, fg=self.pal["bad_ink"])
+        if not an.phantom:
+            self.ex_left.set_image(None)
+            self.ex_right.set_image(None)
+            self.ex_note.config(text=reveal.verdict(an, im, st["factor"]),
+                                fg=self.pal["warn_ink"])
+            return
+
+        if st["auto"] and abs(f - st["factor"]) > 1e-6:
+            st["factor"] = f
+            self.ex_factor.set(f)
+            self.ex_lbl.config(text="%.1f×" % f)
+
+        fg_img, bg_img = views
+        self.ex_left.set_image(fg_img)
+        self.ex_right.set_image(bg_img)
+        self.ex_right.set_caption("提亮 %.1f×" % f)
+        self.ex_note.config(text=reveal.verdict(an, im, f), fg=self.pal["ink3"])
+
+    def _ex_fail(self, exc):
+        if not self._alive("reveal", "ex_left"):
+            return
+        self.ex_note.config(text="处理失败：%s" % exc, fg=self.pal["bad_ink"])
 
     def _ex_apply(self, recompute: bool, an=None, im=None):
         st = self.st_ex
@@ -1194,18 +1318,29 @@ class App(_Base):
             return
 
         big = PREVIEW_SIDE
-        work = im
-        if max(im.size) > big:
-            work = im.resize(
-                (max(1, round(im.size[0] * big / max(im.size))),
-                 max(1, round(im.size[1] * big / max(im.size)))), LANCZOS)
+        factor = st["factor"]
 
+        def job():
+            work = im
+            if max(im.size) > big:
+                work = im.resize(
+                    (max(1, round(im.size[0] * big / max(im.size))),
+                     max(1, round(im.size[1] * big / max(im.size)))), LANCZOS)
+            return reveal.build_fg(work), reveal.build_bg(work, factor), factor
+
+        self.tasks.submit("reveal", job, on_ok=lambda r: self._ex_paint(*r),
+                          on_err=self._ex_fail)
+
+    def _ex_paint(self, fg_img, bg_img, factor):
+        if not self._alive("reveal", "ex_left"):
+            return
         try:
-            self.ex_left.set_image(reveal.build_fg(work))
-            self.ex_right.set_image(reveal.build_bg(work, st["factor"]))
-            self.ex_right.set_caption("提亮 %.1f×" % st["factor"])
-            self.ex_note.config(text=reveal.verdict(an, im, st["factor"]),
-                                fg=self.pal["ink3"])
+            self.ex_left.set_image(fg_img)
+            self.ex_right.set_image(bg_img)
+            self.ex_right.set_caption("提亮 %.1f×" % factor)
+            self.ex_note.config(
+                text=reveal.verdict(self._ex_stat, self._ex_img, factor),
+                fg=self.pal["ink3"])
         except Exception as exc:  # noqa: BLE001
             self.ex_note.config(text="渲染失败：%s" % exc, fg=self.pal["bad_ink"])
 
@@ -1294,6 +1429,8 @@ class App(_Base):
         self.cu_b.grid(row=0, column=1, sticky="nsew", padx=8)
         self.cu_c = PreviewTile(pv, pal, "衬底效果", "", bg_rgb=(255, 255, 255), size=cell)
         self.cu_c.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+        # 转圈挂在中间那格：那是结果最终要去的地方
+        self._spin("cut", self.cu_b)
 
         # ── 结论 ─────────────────────────────────────────
         self.cu_note = tk.Label(
@@ -1351,11 +1488,17 @@ class App(_Base):
         if not path:
             return
         self.cu_note.config(text="正在识别主体…", fg=self.pal["ink3"])
-        self.update_idletasks()
-        try:
-            res = matting.cut(path, max_side=CUT_PREVIEW_SIDE)
-        except Exception as exc:                      # noqa: BLE001
-            self.cu_note.config(text="处理失败：%s" % exc, fg=self.pal["bad_ink"])
+        # 抠图是全项目最重的操作（AI 模式约 2.5 秒），必须丢到后台，
+        # 否则主线程卡死，转圈也转不动。
+        self.tasks.submit(
+            "cut",
+            fn=lambda: matting.cut(path, max_side=CUT_PREVIEW_SIDE),
+            on_ok=self._cu_done,
+            on_err=self._cu_fail,
+        )
+
+    def _cu_done(self, res):
+        if not self._alive("cut", "cu_a"):
             return
         if res is None:
             self.cu_note.config(text="这张图读不出来（格式不支持或文件损坏）。",
@@ -1366,6 +1509,11 @@ class App(_Base):
         self._cu_paint()
         self.cu_note.config(text=self._cu_text(res),
                             fg=self.pal["warn_ink"] if res.issues else self.pal["ink3"])
+
+    def _cu_fail(self, exc):
+        if not self._alive("cut", "cu_a"):
+            return
+        self.cu_note.config(text="处理失败：%s" % exc, fg=self.pal["bad_ink"])
 
     def _cu_text(self, res) -> str:
         bits = ["模式 %s" % ("AI 分割" if res.mode == "ai" else "基础算法"),
@@ -1410,21 +1558,27 @@ class App(_Base):
             return
 
         self.toast("按原尺寸重算中…")
-        self.update_idletasks()
-        try:
+        bd = self.st_cu["backdrop"]
+
+        def job():
             full = matting.cut(path)              # 不缩，保持原分辨率
             if full is None:
-                self.toast("读不出这张图。", True)
-                return
+                return None
             if what == "png":
                 matting.save_png(full, out)
             else:
-                matting.save_compose(full, out, self.st_cu["backdrop"], max_side=0)
-        except Exception as exc:                  # noqa: BLE001
-            self.toast("保存失败：%s" % exc, True)
-            return
-        self.toast("已保存 %s（%dx%d）"
-                   % (fmt_size(os.path.getsize(out)), full.size[0], full.size[1]))
+                matting.save_compose(full, out, bd, max_side=0)
+            return full
+
+        def ok(full):
+            if full is None:
+                self.toast("读不出这张图。", True)
+                return
+            self.toast("已保存 %s（%dx%d）"
+                       % (fmt_size(os.path.getsize(out)), full.size[0], full.size[1]))
+
+        self.tasks.submit("cut", job, on_ok=ok,
+                          on_err=lambda e: self.toast("保存失败：%s" % e, True))
 
 
 def run():
