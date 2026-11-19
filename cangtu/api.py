@@ -191,6 +191,10 @@ class HostContext:
     def confirm(self, title: str, message: str, danger: bool = False) -> bool:
         return self._app._confirm(title, message, danger)
 
+    def alert(self, title: str, message: str) -> None:
+        """纯告知，不带「是/否」。校验失败、缺卷这类信息要用它。"""
+        self._app._alert(title, message)
+
     # ── 状态与并发 ────────────────────────────────────────
     @property
     def tasks(self):

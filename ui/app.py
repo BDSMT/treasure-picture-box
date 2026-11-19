@@ -432,6 +432,17 @@ class App(_Base):
         except Exception:  # noqa: BLE001
             return False
 
+    def _alert(self, title, message):
+        """纯告知，不带选项。
+
+        有些信息必须让人看清（比如「缺第 3 卷」），toast 一闪就过去了；
+        但也不能用 confirm —— 给一个「确定/取消」会让人以为要做什么决定。
+        """
+        try:
+            messagebox.showwarning(title, message, parent=self)
+        except Exception:  # noqa: BLE001
+            pass
+
     def save_config(self):
         P.save_config(self.cfg)
 

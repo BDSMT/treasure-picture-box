@@ -31,7 +31,7 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001  被重定向或老版本 Python，忽略即可
         pass
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 APP_NAME = "藏图盒"
 BUILD_DIR = "build"
 RELEASE_DIR = "release"
@@ -89,6 +89,10 @@ READ_ME = """\
 
   抠图      把画面主体抠出来，左中右三张：原图、抠出的元素、衬底效果。
             衬白底还是黑底自动选，深色主体配白底、浅色配黑底，对比最大。
+
+  分卷解压  拖入任意一卷，自动找齐同目录的其他卷，先验完整再解压。
+            缺卷、只下了一半、内容损坏，都会在解压前拦住并说明缺哪一卷，
+            不会让你拿到一个看起来正常、其实已经坏掉的文件。
 
 
 【模块是插件，看不见就是不能用】

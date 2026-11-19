@@ -172,9 +172,10 @@ def main() -> int:
 
         print("\n[1] 侧栏来自清单")
         metas = app.plugin_list()
-        check("五个模块", len(metas) == 5, ", ".join(m.id for m in metas))
+        check("六个模块", len(metas) == 6, ", ".join(m.id for m in metas))
         check("顺序 seed→unpack→phantom→reveal→cut",
-              [m.id for m in metas] == ["seed", "unpack", "phantom", "reveal", "cut"])
+              [m.id for m in metas] == ["seed", "unpack", "phantom", "reveal",
+                                        "cut", "split"])
         check("全部通过依赖探测", all(m.ready for m in metas),
               ", ".join("%s=%s" % (m.id, m.why_not() or "ok") for m in metas))
         grab(app, "plugin_seed.png")
@@ -353,7 +354,8 @@ def main() -> int:
 
         print("\n[7] 所有可见模块都能挂载")
         ids = [m.id for m in app.plugin_list()]
-        check("五个模块都可见", ids == ["seed", "unpack", "phantom", "reveal", "cut"],
+        check("六个模块都可见",
+              ids == ["seed", "unpack", "phantom", "reveal", "cut", "split"],
               str(ids))
         for pid in ids:
             app.tab = pid

@@ -1,0 +1,11 @@
+{
+  "id": "split",
+  "name": "分卷解压",
+  "subtitle": "缺卷检测 · 完整校验",
+  "order": 60,
+  "api_version": "1.0",
+  "entry": "plugin.py",
+  "description": "拖入任意一卷，自动找齐同目录的其他卷，先验完整再解压",
+  "requires": [],
+  "probe": []
+}

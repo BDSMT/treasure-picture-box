@@ -246,6 +246,18 @@ def _selftest() -> int:
         except Exception:  # noqa: BLE001
             log("插件: ❌\n" + traceback.format_exc())
 
+        # ── 分卷解压后端 ──────────────────────────────
+        # 7z.exe 是随包带的，找不到就说明打包漏了文件或者被杀软隔离了 ——
+        # 这两种情况用户自己很难判断，必须在自检里点名。
+        try:
+            from core import splitvol as _sv
+
+            _ok, _why = _sv.backend()
+            log("分卷后端: %s %s" % ("✅" if _ok else "❌", _why))
+            log("  7z 路径: %s" % (_sv.exe() or "（未找到）"))
+        except Exception:  # noqa: BLE001
+            log("分卷后端: ❌\n" + traceback.format_exc())
+
 
         tmp = Path(tempfile.mkdtemp(prefix="seedbox_"))
         try:

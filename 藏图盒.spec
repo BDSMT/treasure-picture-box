@@ -54,12 +54,19 @@ a = Analysis(
     # 刻意是数据文件而不是 hiddenimports：插件要在运行期按路径 import，
     # 让 PyInstaller 静态分析它们，反而会被打进 PYZ 而丢失源码路径。
     # 里面的 manifest.json 是运行期状态，build.py 在打包前会先删掉它。
-    datas=dnd_datas + [(os.path.join(ROOT, "plugins"), "plugins")],
+    #
+    # runtime/ 放的是外部可执行文件（目前只有 7z.exe + 7z.dll，用于分卷解压）。
+    # 它们是 datas 而不是 binaries：binary 会被 PyInstaller 改写依赖、
+    # 可能被重命名，而 7z.exe 必须和同目录的 7z.dll 保持原名才能加载。
+    datas=dnd_datas + [
+        (os.path.join(ROOT, "plugins"), "plugins"),
+        (os.path.join(ROOT, "runtime"), "runtime"),
+    ],
     hiddenimports=[
         "tkinterdnd2", "tkinterdnd2.TkinterDnD",
         "core.paths", "core.sniff", "core.seed", "core.phantom",
         "core.reveal", "core.imageio", "core.unpack", "core.zipfix",
-        "core.matting",
+        "core.matting", "core.splitvol",
         "cangtu.api", "cangtu.loader", "cangtu.tasks", "cangtu.spinner",
         "ui.app", "ui.theme", "ui.widgets",
         "PIL._tkinter_finder",
@@ -94,6 +101,14 @@ _DROP = ("opencv_videoio_ffmpeg", "cv2/data/haarcascade", "cv2/data/lbpcascade")
 _DROP += ("torch",)
 a.binaries = [b for b in a.binaries if not any(k in b[0] for k in _DROP)]
 a.datas = [d for d in a.datas if not any(k in d[0] for k in _DROP)]
+
+# __pycache__ 是本机跑测试留下的字节码，跟着插件目录一起被收集进来了。
+# 它不该出现在发布包里：不同 Python 版本不认别人的 pyc，而且这些文件
+# 在用户机器上被当成「插件的一部分」，出问题时徒增干扰。
+_before = len(a.datas)
+a.datas = [d for d in a.datas if "__pycache__" not in d[0].replace("\\", "/")]
+if len(a.datas) != _before:
+    print("[spec] 已剔除 %d 个 __pycache__ 条目" % (_before - len(a.datas)))
 print("[spec] 已剔除 cv2 视频解码 / 人脸级联 / torch")
 
 exe = EXE(
